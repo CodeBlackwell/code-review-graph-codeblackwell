@@ -88,6 +88,16 @@ def _supports_color() -> bool:
     return sys.stdout.isatty()
 
 
+def _print_disambiguated(result: dict, limit: int = 10) -> None:
+    """Report duplicate symbol names that were disambiguated during a build."""
+    dups = result.get("disambiguated_nodes") or []
+    if not dups:
+        return
+    shown = ", ".join(dups[:limit])
+    more = f" (+{len(dups) - limit} more)" if len(dups) > limit else ""
+    print(f"Disambiguated {len(dups)} duplicate symbol name(s): {shown}{more}")
+
+
 def _print_banner() -> None:
     """Print the startup banner with graph art and available commands."""
     color = _supports_color()
@@ -994,6 +1004,7 @@ def main() -> None:
             nodes = result.get("total_nodes", 0)
             edges = result.get("total_edges", 0)
             print(f"Full build: {parsed} files, {nodes} nodes, {edges} edges (postprocess={pp})")
+            _print_disambiguated(result)
             if result.get("errors"):
                 print(f"Errors: {len(result['errors'])}")
 
@@ -1019,6 +1030,7 @@ def main() -> None:
                 f"{nodes} nodes, {edges} edges"
                 f" (postprocess={pp})"
             )
+            _print_disambiguated(result)
 
             # --brief: append a one-line change-impact summary with the same
             # estimated context-savings approximation that detect-changes uses.

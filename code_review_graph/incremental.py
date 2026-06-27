@@ -905,10 +905,18 @@ def full_build(
     spring_stats = _run_spring_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
 
+    disambiguated = store.find_disambiguated_nodes()
+    if disambiguated:
+        logger.info(
+            "Disambiguated %d duplicate qualified_name(s): %s",
+            len(disambiguated), ", ".join(disambiguated),
+        )
+
     return {
         "files_parsed": len(files),
         "total_nodes": total_nodes,
         "total_edges": total_edges,
+        "disambiguated_nodes": disambiguated,
         "errors": errors,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
@@ -1043,10 +1051,13 @@ def incremental_update(
     spring_stats = _run_spring_resolver(store) if spring_changed else None
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
 
+    disambiguated = store.find_disambiguated_nodes()
+
     return {
         "files_updated": len(all_files),
         "total_nodes": total_nodes,
         "total_edges": total_edges,
+        "disambiguated_nodes": disambiguated,
         "changed_files": list(changed_files),
         "dependent_files": list(dependent_files),
         "errors": errors,
