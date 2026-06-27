@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -24,6 +25,10 @@ from .migrations import get_schema_version, run_migrations
 from .parser import EdgeInfo, NodeInfo
 
 logger = logging.getLogger(__name__)
+
+# Suffix appended by _qualified_names_for_file to a 2nd+ same-file collision,
+# e.g. "path::getById:L394". This regex recognizes those keys after the fact.
+_DISAMBIGUATED_RE = re.compile(r":L\d+(?:#\d+)?$")
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -875,6 +880,21 @@ class GraphStore:
             languages=languages,
             files_count=files_count,
             last_updated=last_updated,
+        )
+
+    def find_disambiguated_nodes(self) -> list[str]:
+        """Qualified names suffixed to resolve a same-file name collision.
+
+        When two same-named symbols share a file, the first keeps its bare key
+        and later ones get a ``:L<line>`` suffix (see _qualified_names_for_file).
+        Surfacing these makes the otherwise-invisible collisions reportable.
+        """
+        rows = self._conn.execute(
+            "SELECT qualified_name FROM nodes WHERE qualified_name GLOB '*:L[0-9]*'"
+        ).fetchall()
+        return sorted(
+            r["qualified_name"] for r in rows
+            if _DISAMBIGUATED_RE.search(r["qualified_name"])
         )
 
     def get_nodes_by_size(
