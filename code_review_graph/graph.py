@@ -186,10 +186,19 @@ class GraphStore:
 
     # --- Write operations ---
 
-    def upsert_node(self, node: NodeInfo, file_hash: str = "") -> int:
-        """Insert or update a node. Returns the node ID."""
+    def upsert_node(
+        self, node: NodeInfo, file_hash: str = "", qualified: str | None = None
+    ) -> int:
+        """Insert or update a node. Returns the node ID.
+
+        Pass ``qualified`` to override the computed key — used by the batch store
+        functions to disambiguate same-named symbols in one file (see
+        ``_qualified_names_for_file``). Without it, collisions would collapse
+        under ``ON CONFLICT(qualified_name) DO UPDATE`` and silently drop nodes.
+        """
         now = time.time()
-        qualified = self._make_qualified(node)
+        if qualified is None:
+            qualified = self._make_qualified(node)
         extra = json.dumps(node.extra) if node.extra else "{}"
 
         self._conn.execute(
@@ -276,8 +285,9 @@ class GraphStore:
         self._begin_immediate()
         try:
             self.remove_file_data(file_path)
-            for node in nodes:
-                self.upsert_node(node, file_hash=fhash)
+            qualified_names = self._qualified_names_for_file(nodes)
+            for node, qualified in zip(nodes, qualified_names):
+                self.upsert_node(node, file_hash=fhash, qualified=qualified)
             for edge in edges:
                 self.upsert_edge(edge)
             self._conn.commit()
@@ -294,8 +304,9 @@ class GraphStore:
         try:
             for file_path, nodes, edges, fhash in batch:
                 self.remove_file_data(file_path)
-                for node in nodes:
-                    self.upsert_node(node, file_hash=fhash)
+                qualified_names = self._qualified_names_for_file(nodes)
+                for node, qualified in zip(nodes, qualified_names):
+                    self.upsert_node(node, file_hash=fhash, qualified=qualified)
                 for edge in edges:
                     self.upsert_edge(edge)
             self._conn.commit()
@@ -1299,6 +1310,29 @@ class GraphStore:
         if node.parent_name:
             return f"{node.file_path}::{node.parent_name}.{node.name}"
         return f"{node.file_path}::{node.name}"
+
+    def _qualified_names_for_file(self, nodes: list[NodeInfo]) -> list[str]:
+        """Compute collision-free qualified names for one file's nodes.
+
+        The first occurrence of a key keeps its bare form so existing edges
+        (which reference the same parser-computed key) still resolve to it.
+        Later same-key symbols are suffixed with their start line — two defs
+        cannot share a ``line_start``, so this is always unique.
+        """
+        names: list[str] = []
+        seen: set[str] = set()
+        for index, node in enumerate(nodes):
+            base = self._make_qualified(node)
+            if base not in seen:
+                seen.add(base)
+                names.append(base)
+                continue
+            candidate = f"{base}:L{node.line_start}"
+            if candidate in seen:
+                candidate = f"{base}:L{node.line_start}#{index}"
+            seen.add(candidate)
+            names.append(candidate)
+        return names
 
     def _row_to_node(self, row: sqlite3.Row) -> GraphNode:
         return GraphNode(
