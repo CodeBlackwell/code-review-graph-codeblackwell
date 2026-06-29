@@ -4,6 +4,12 @@
   <strong>Stop burning tokens. Start reviewing smarter.</strong>
 </p>
 
+> **Fork notice.** This package (`code-review-graph-codeblackwell` on PyPI) is a community fork of
+> [tirth8205/code-review-graph](https://github.com/tirth8205/code-review-graph) by Tirth Kanani (MIT),
+> maintained so fixes ship without waiting on upstream review. It is not the official package and is
+> not affiliated with or endorsed by the original author. The CLI command and MCP server are still
+> named `code-review-graph`. All upstream credit belongs to the original project.
+
 <p align="center">
   <a href="README.md">English</a> |
   <a href="README.zh-CN.md">简体中文</a> |
