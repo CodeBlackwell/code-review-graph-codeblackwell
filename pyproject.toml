@@ -42,11 +42,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/CodeBlackwell/code-review-graph"
-Repository = "https://github.com/CodeBlackwell/code-review-graph"
-Documentation = "https://github.com/CodeBlackwell/code-review-graph/blob/main/docs/INDEX.md"
-Changelog = "https://github.com/CodeBlackwell/code-review-graph/blob/main/CHANGELOG.md"
-Issues = "https://github.com/CodeBlackwell/code-review-graph/issues"
+Homepage = "https://github.com/CodeBlackwell/code-review-graph-codeblackwell"
+Repository = "https://github.com/CodeBlackwell/code-review-graph-codeblackwell"
+Documentation = "https://github.com/CodeBlackwell/code-review-graph-codeblackwell/blob/main/docs/INDEX.md"
+Changelog = "https://github.com/CodeBlackwell/code-review-graph-codeblackwell/blob/main/CHANGELOG.md"
+Issues = "https://github.com/CodeBlackwell/code-review-graph-codeblackwell/issues"
 Upstream = "https://github.com/tirth8205/code-review-graph"
 
 [project.scripts]
