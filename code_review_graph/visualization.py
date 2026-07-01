@@ -678,6 +678,9 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     <button class="legend-item legend-edge" data-edge-kind="IMPLEMENTS" aria-pressed="true"><span class="legend-line" style="border-top:2px dashed #f9e2af"></span> Implements</button>
     <button class="legend-item legend-edge" data-edge-kind="TESTED_BY" aria-pressed="true"><span class="legend-line" style="border-top:2px dotted #f38ba8"></span> Tested By</button>
     <button class="legend-item legend-edge" data-edge-kind="DEPENDS_ON" aria-pressed="true"><span class="legend-line" style="border-top:2px dashed #fab387"></span> Depends On</button>
+    <button class="legend-item legend-edge" data-edge-kind="OVERRIDES" aria-pressed="true"><span class="legend-line" style="border-top:2px dotted #f778ba"></span> Overrides</button>
+    <button class="legend-item legend-edge" data-edge-kind="STYLES" aria-pressed="true"><span class="legend-line" style="border-top:2px dashed #79c0ff"></span> Styles</button>
+    <button class="legend-item legend-edge" data-edge-kind="POTENTIAL_CONFLICT" aria-pressed="true"><span class="legend-line" style="border-top:2px dotted #f85149"></span> Conflict</button>
   </div>
 </nav>
 <div id="filter-panel">
@@ -746,7 +749,7 @@ var KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#
 var KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5 };
 var KIND_AREA   = { File:1018, Class:452, Function:113, Test:113, Type:79 };
 var KIND_SHAPE  = { File:d3.symbolCircle, Class:d3.symbolSquare, Function:d3.symbolTriangle, Test:d3.symbolDiamond, Type:d3.symbolCross };
-var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387" };
+var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387", OVERRIDES:"#f778ba", STYLES:"#79c0ff", POTENTIAL_CONFLICT:"#f85149" };
 var communityColorScale = d3.scaleOrdinal(d3.schemeTableau10);
 var communityColoringOn = false;
 function escH(s) { return !s ? "" : s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;").replace(/`/g,"&#96;"); }
@@ -831,12 +834,18 @@ var tooltip = document.getElementById("tooltip");
 function showTooltip(ev, d) {
   var bg = communityColoringOn && d.community_id != null ? communityColorScale(d.community_id) : (KIND_COLOR[d.kind] || "#555");
   var relFile = d.file_path ? d.file_path.split("/").slice(-3).join("/") : "";
+  var ex = d.extra || {};
+  var kindLabel = ex.css_kind ? ("CSS " + escH(ex.css_kind)) : escH(d.kind);
   var h = '<span class="tt-name">' + escH(d.label) + '</span>';
-  h += '<span class="tt-kind" style="background:' + bg + ';color:#0d1117">' + escH(d.kind) + '</span>';
+  h += '<span class="tt-kind" style="background:' + bg + ';color:#0d1117">' + kindLabel + '</span>';
   if (relFile) h += '<div class="tt-row tt-file">' + escH(relFile) + '</div>';
   if (d.line_start != null) h += '<div class="tt-row"><span class="tt-label">Lines: </span>' + d.line_start + ' \u2013 ' + (d.line_end || d.line_start) + '</div>';
   if (d.params) h += '<div class="tt-row"><span class="tt-label">Params: </span>' + escH(d.params) + '</div>';
   if (d.return_type) h += '<div class="tt-row"><span class="tt-label">Returns: </span>' + escH(d.return_type) + '</div>';
+  if (ex.specificity) {
+    var sp = ex.specificity;
+    h += '<div class="tt-row"><span class="tt-label">Specificity: </span>(' + (Array.isArray(sp) ? sp.join(",") : sp) + ')</div>';
+  }
   if (d.community_id != null) {
     var comm = communities.find(function(c) { return c.id === d.community_id; });
     if (comm) h += '<div class="tt-row"><span class="tt-label">Community: </span>' + escH(comm.name) + '</div>';
@@ -867,7 +876,7 @@ var defs = svg.append("defs");
 var glow = defs.append("filter").attr("id","glow").attr("x","-50%").attr("y","-50%").attr("width","200%").attr("height","200%");
 glow.append("feGaussianBlur").attr("stdDeviation","3").attr("result","blur");
 glow.append("feComposite").attr("in","SourceGraphic").attr("in2","blur").attr("operator","over");
-[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"},{id:"arrow-implements",color:"#f9e2af"},{id:"arrow-tested_by",color:"#f38ba8"},{id:"arrow-depends_on",color:"#fab387"}].forEach(function(mk) {
+[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"},{id:"arrow-implements",color:"#f9e2af"},{id:"arrow-tested_by",color:"#f38ba8"},{id:"arrow-depends_on",color:"#fab387"},{id:"arrow-overrides",color:"#f778ba"},{id:"arrow-styles",color:"#79c0ff"},{id:"arrow-conflict",color:"#f85149"}].forEach(function(mk) {
   defs.append("marker").attr("id", mk.id)
     .attr("viewBox","0 -5 10 10").attr("refX",28).attr("refY",0)
     .attr("markerWidth",8).attr("markerHeight",8).attr("orient","auto")
@@ -894,6 +903,9 @@ var EDGE_CFG = {
   IMPLEMENTS:   { dash:"4,3", width:1.5, opacity:0.65, marker:"url(#arrow-implements)" },
   TESTED_BY:    { dash:"2,4", width:1.5, opacity:0.6, marker:"url(#arrow-tested_by)" },
   DEPENDS_ON:   { dash:"8,4", width:1, opacity:0.6, marker:"url(#arrow-depends_on)" },
+  OVERRIDES:    { dash:"2,4", width:1.5, opacity:0.65, marker:"url(#arrow-overrides)" },
+  STYLES:       { dash:"4,4", width:1.5, opacity:0.6, marker:"url(#arrow-styles)" },
+  POTENTIAL_CONFLICT: { dash:"2,2", width:2, opacity:0.8, marker:"url(#arrow-conflict)" },
 };
 function eStyle(d) { return EDGE_CFG[d.kind] || {dash:null,width:1,opacity:0.3,marker:""}; }
 function eColor(d) { return EDGE_COLOR[d.kind] || "#484f58"; }
@@ -942,8 +954,9 @@ function updateNodes() {
   enter.append("path").attr("class","node-shape")
     .attr("d", function(d) { return d3.symbol().type(KIND_SHAPE[d.kind] || d3.symbolCircle).size(KIND_AREA[d.kind] || 113)(); })
     .attr("fill", function(d) { return nodeColor(d); })
-    .attr("stroke", function(d) { return d.kind === "File" ? "rgba(88,166,255,0.3)" : "rgba(255,255,255,0.08)"; })
-    .attr("stroke-width", function(d) { return d.kind === "File" ? 2 : 1; })
+    .attr("stroke", function(d) { if ((d.extra||{}).css_kind) return "#f778ba"; return d.kind === "File" ? "rgba(88,166,255,0.3)" : "rgba(255,255,255,0.08)"; })
+    .attr("stroke-width", function(d) { return (d.extra||{}).css_kind ? 2 : (d.kind === "File" ? 2 : 1); })
+    .attr("stroke-dasharray", function(d) { return (d.extra||{}).css_kind ? "3,2" : null; })
     .attr("cursor", "pointer");
   enter
     .on("mouseover", function(ev, d) { highlightConnected(d, true); showTooltip(ev, d); })
