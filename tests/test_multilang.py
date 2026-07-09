@@ -2857,3 +2857,46 @@ class TestLESSParsing:
     def test_nodes_have_less_language(self):
         for node in self.nodes:
             assert node.language == "less"
+
+
+class TestSvelteStyleParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(
+            FIXTURES / "sample_widget.svelte",
+        )
+
+    def test_finds_script_functions(self):
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        names = {f.name for f in funcs}
+        assert "increment" in names
+
+    def test_finds_style_selectors(self):
+        selectors = [
+            n for n in self.nodes
+            if n.kind == "Class" and n.extra.get("css_kind") == "selector"
+        ]
+        names = {s.name for s in selectors}
+        assert ".btn" in names
+        assert ".btn--primary" in names
+        assert ".counter" in names
+
+    def test_style_nodes_have_svelte_language(self):
+        selectors = [
+            n for n in self.nodes if n.extra.get("css_kind") == "selector"
+        ]
+        for sel in selectors:
+            assert sel.language == "svelte"
+
+    def test_markup_classes_on_file_node(self):
+        file_node = next(n for n in self.nodes if n.kind == "File")
+        classes = file_node.extra.get("css_classes", [])
+        assert "btn" in classes
+        assert "btn--primary" in classes
+        assert "counter" in classes
+
+    def test_class_directive_not_collected_as_static(self):
+        file_node = next(n for n in self.nodes if n.kind == "File")
+        classes = file_node.extra.get("css_classes", [])
+        # class:active={...} is a dynamic directive, not a static class
+        assert "active" not in classes
