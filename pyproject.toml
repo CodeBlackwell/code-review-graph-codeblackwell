@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "code-review-graph-codeblackwell"
-version = "2.3.6.post1"
+version = "2.4.0"
 description = "Local-first knowledge graph for token-efficient code review through MCP and CLI. Fork of tirth8205/code-review-graph with additional fixes; CLI and MCP server remain `code-review-graph`."
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT"

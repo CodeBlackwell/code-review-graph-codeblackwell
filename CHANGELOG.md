@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-07-08
+
+**Stylesheet graph support.** CSS, SCSS, and LESS are now first-class in the
+graph: selectors, custom properties, and at-rules become nodes, and the
+linker connects them to the JSX, Vue, and Svelte templates that use them.
+
+### Added
+
+- **CSS/SCSS parsing via tree-sitter, LESS via regex fallback**: selectors,
+  custom properties, `@media`, `@keyframes`, mixins, and SCSS variables
+  become graph nodes, with specificity computed per selector.
+- **Cross-language `STYLES` edges** linking JSX `className`, Vue/Svelte
+  static template classes, and CSS Modules references (camelCase resolved to
+  kebab-case) to the selectors that style them.
+- **`OVERRIDES` edges** for same-file specificity/source-order/`!important`
+  overrides, and **`POTENTIAL_CONFLICT` edges** for the same class name
+  targeted from different files.
+- **Vue and Svelte `<style>` block parsing** (including `<style lang="scss">`)
+  with correct line offsets, plus `@import` resolution including SCSS
+  partials.
+- Five new `query_graph` patterns: `styles_of`, `styled_by`, `overrides_of`,
+  `overridden_by`, `conflicts_of`.
+- Visualization: new edge colors/dashes/legend entries and a dashed ring on
+  CSS nodes; review guidance now flags affected CSS override relationships.
+- 68 new tests covering fixtures and end-to-end linking through `full_build`.
+
+### Changed
+
+- Cross-file CSS linking runs as a best-effort post-commit resolver (matching
+  the ReScript/Spring/Temporal resolver contract) and is skipped on
+  incremental updates when no style-relevant file changed.
+- Docs: language lists, edge-type schema (docs/schema.md), and query
+  patterns (docs/COMMANDS.md) updated for the new CSS graph.
+
 ## [2.3.6] - 2026-06-10
 
 **Community-response release.** Built from a full audit of every open PR,
