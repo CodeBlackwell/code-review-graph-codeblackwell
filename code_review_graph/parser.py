@@ -2007,6 +2007,35 @@ class CodeParser:
 
         return static_classes, module_refs
 
+    @staticmethod
+    def _attr_name_value(attr_node) -> tuple[Optional[str], Optional[str]]:
+        """Decode an SFC ``attribute`` AST node into (name, value).
+
+        Value comes from a quoted_attribute_value child; bare/boolean and
+        expression-valued attributes yield value=None.
+        """
+        attr_name = None
+        attr_value = None
+        for child in attr_node.children:
+            if child.type == "attribute_name":
+                attr_name = child.text.decode("utf-8", errors="replace")
+            elif child.type == "quoted_attribute_value":
+                for v in child.children:
+                    if v.type == "attribute_value":
+                        attr_value = v.text.decode("utf-8", errors="replace")
+        return attr_name, attr_value
+
+    @classmethod
+    def _tag_attrs(cls, start_tag) -> dict[str, str]:
+        """Decode all quoted attributes of an SFC start_tag into {name: value}."""
+        attrs: dict[str, str] = {}
+        for attr in start_tag.children:
+            if attr.type == "attribute":
+                name, value = cls._attr_name_value(attr)
+                if name is not None and value is not None:
+                    attrs[name] = value
+        return attrs
+
     def _extract_vue_template_classes(self, node) -> list[str]:
         """Recursively walk Vue template AST, extract class='...' values.
 
@@ -2017,19 +2046,7 @@ class CodeParser:
         while stack:
             n = stack.pop()
             if n.type == "attribute":
-                attr_name = None
-                attr_value = None
-                for child in n.children:
-                    if child.type == "attribute_name":
-                        attr_name = child.text.decode(
-                            "utf-8", errors="replace",
-                        )
-                    elif child.type == "quoted_attribute_value":
-                        for v in child.children:
-                            if v.type == "attribute_value":
-                                attr_value = v.text.decode(
-                                    "utf-8", errors="replace",
-                                )
+                attr_name, attr_value = self._attr_name_value(n)
                 if attr_name == "class" and attr_value:
                     classes.extend(attr_value.split())
             # Skip directive_attribute (:class bindings)
@@ -2077,22 +2094,10 @@ class CodeParser:
                 elif sub.type == "raw_text":
                     raw_text_node = sub
 
-            if start_tag:
-                for attr in start_tag.children:
-                    if attr.type == "attribute":
-                        attr_name = None
-                        attr_value = None
-                        for a in attr.children:
-                            if a.type == "attribute_name":
-                                attr_name = a.text.decode("utf-8", errors="replace")
-                            elif a.type == "quoted_attribute_value":
-                                for v in a.children:
-                                    if v.type == "attribute_value":
-                                        attr_value = v.text.decode(
-                                            "utf-8", errors="replace",
-                                        )
-                        if attr_name == "lang" and attr_value in ("ts", "typescript"):
-                            script_lang = "typescript"
+            if start_tag and self._tag_attrs(start_tag).get("lang") in (
+                "ts", "typescript",
+            ):
+                script_lang = "typescript"
 
             if not raw_text_node:
                 continue
@@ -2143,7 +2148,7 @@ class CodeParser:
             if child.type == "template_element":
                 template_classes = self._extract_vue_template_classes(child)
                 if template_classes:
-                    all_nodes[0].extra["vue_template_classes"] = sorted(
+                    all_nodes[0].extra["css_classes"] = sorted(
                         set(template_classes),
                     )
                 break  # Only one <template> per SFC
@@ -2189,22 +2194,10 @@ class CodeParser:
                 elif sub.type == "raw_text":
                     raw_text_node = sub
 
-            if start_tag:
-                for attr in start_tag.children:
-                    if attr.type == "attribute":
-                        attr_name = None
-                        attr_value = None
-                        for a in attr.children:
-                            if a.type == "attribute_name":
-                                attr_name = a.text.decode("utf-8", errors="replace")
-                            elif a.type == "quoted_attribute_value":
-                                for v in a.children:
-                                    if v.type == "attribute_value":
-                                        attr_value = v.text.decode(
-                                            "utf-8", errors="replace",
-                                        )
-                        if attr_name == "lang" and attr_value in ("scss", "sass"):
-                            style_lang = "scss"
+            if start_tag and self._tag_attrs(start_tag).get("lang") in (
+                "scss", "sass",
+            ):
+                style_lang = "scss"
 
             if not raw_text_node:
                 continue
@@ -2274,29 +2267,10 @@ class CodeParser:
                 elif sub.type == "raw_text":
                     raw_text_node = sub
 
-            if start_tag:
-                for attr in start_tag.children:
-                    if attr.type == "attribute":
-                        attr_name = None
-                        attr_value = None
-                        for a in attr.children:
-                            if a.type == "attribute_name":
-                                attr_name = a.text.decode(
-                                    "utf-8", errors="replace",
-                                )
-                            elif a.type == "quoted_attribute_value":
-                                for v in a.children:
-                                    if v.type == "attribute_value":
-                                        attr_value = v.text.decode(
-                                            "utf-8",
-                                            errors="replace",
-                                        )
-                        if (
-                            attr_name == "lang"
-                            and attr_value
-                            in ("ts", "typescript")
-                        ):
-                            script_lang = "typescript"
+            if start_tag and self._tag_attrs(start_tag).get("lang") in (
+                "ts", "typescript",
+            ):
+                script_lang = "typescript"
 
             if not raw_text_node:
                 continue

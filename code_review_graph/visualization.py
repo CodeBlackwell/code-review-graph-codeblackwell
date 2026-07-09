@@ -1648,6 +1648,11 @@ function eColor(d) { return EDGE_COLOR[d.kind] || "#484f58"; }
 /* --- Legend setup --- */
 var legendNodes = document.getElementById("legend-nodes");
 var legendEdges = document.getElementById("legend-edges");
+var LEGEND_CLASS = {
+  CROSS_COMMUNITY: "l-cross", DEPENDS_ON: "l-dep", CALLS: "l-calls",
+  IMPORTS_FROM: "l-imports", INHERITS: "l-inherits",
+  OVERRIDES: "l-overrides", STYLES: "l-styles", POTENTIAL_CONFLICT: "l-conflict"
+};
 function buildLegend(nodeKinds, edgeKinds) {
   legendNodes.textContent = "";
   legendEdges.textContent = "";
@@ -1664,7 +1669,7 @@ function buildLegend(nodeKinds, edgeKinds) {
   edgeKinds.forEach(function(k) {
     var div = document.createElement("div");
     div.className = "legend-item";
-    var cls = k === "CROSS_COMMUNITY" ? "l-cross" : k === "DEPENDS_ON" ? "l-dep" : k === "CALLS" ? "l-calls" : k === "IMPORTS_FROM" ? "l-imports" : k === "INHERITS" ? "l-inherits" : k === "OVERRIDES" ? "l-overrides" : k === "STYLES" ? "l-styles" : k === "POTENTIAL_CONFLICT" ? "l-conflict" : "l-contains";
+    var cls = LEGEND_CLASS[k] || "l-contains";
     var line = document.createElement("span");
     line.className = "legend-line " + cls;
     div.appendChild(line);
