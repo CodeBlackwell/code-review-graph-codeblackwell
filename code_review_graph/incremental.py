@@ -82,6 +82,30 @@ def _run_spring_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _run_css_resolver(store: GraphStore) -> Optional[dict]:
+    """Run cross-file CSS linking + conflict detection, swallowing any
+    failure so build never fails because of it. Returns stats or None.
+    """
+    try:
+        selectors = _get_css_selectors(store)
+        styles_count = link_css_styles(store, selectors)
+        conflicts_count = detect_cross_file_conflicts(store, selectors)
+        logger.info(
+            "CSS linking: %d STYLES edges, %d POTENTIAL_CONFLICT edges",
+            styles_count, conflicts_count,
+        )
+        return {"styles_edges": styles_count, "conflict_edges": conflicts_count}
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("CSS resolver failed: %s", exc)
+        return None
+
+
+# File extensions whose changes can affect STYLES/POTENTIAL_CONFLICT edges.
+_CSS_RELEVANT_EXTENSIONS = (
+    ".css", ".scss", ".less", ".vue", ".svelte", ".tsx", ".jsx", ".ts", ".js",
+)
+
+
 def _run_temporal_resolver(store: GraphStore) -> Optional[dict]:
     """Run the Temporal workflow/activity call resolver, swallowing any failure so
     build never fails because of it. Returns stats or None on error.
@@ -819,12 +843,19 @@ def _parse_single_file(
         return (rel_path, [], [], str(e), "")
 
 
-def link_css_styles(store: GraphStore) -> int:
+def _get_css_selectors(store: GraphStore) -> list:
+    """Fetch all CSS selector nodes (css_kind == "selector")."""
+    return store.get_nodes_by_extra_pattern(
+        '%"css_kind":%"selector"%', kind="Class",
+    )
+
+
+def link_css_styles(store: GraphStore, selectors: list | None = None) -> int:
     """Create STYLES edges between class references and CSS selectors.
 
     Queries the graph for:
     1. All CSS selector nodes (css_kind == "selector")
-    2. All nodes with css_classes or vue_template_classes in extra
+    2. All nodes with css_classes in extra (JSX functions, Vue/Svelte files)
 
     Creates STYLES edges from the referencing component/function to
     the matching CSS selector node.
@@ -837,9 +868,8 @@ def link_css_styles(store: GraphStore) -> int:
     store.delete_edges_by_kind("STYLES")
 
     # Build selector index: bare class name → list of (qualified_name, file_path)
-    selectors = store.get_nodes_by_extra_pattern(
-        '%"css_kind":%"selector"%', kind="Class",
-    )
+    if selectors is None:
+        selectors = _get_css_selectors(store)
     selector_index: dict[str, list[tuple[str, str]]] = {}
     for sel in selectors:
         sel_name = sel.name.strip()
@@ -885,41 +915,19 @@ def link_css_styles(store: GraphStore) -> int:
                 ))
                 count += 1
 
-    # Link Vue template class references
-    vue_nodes = store.get_nodes_by_extra_pattern('%"vue_template_classes"%')
-    for node in vue_nodes:
-        classes = node.extra.get("vue_template_classes", [])
-        for cls_name in classes:
-            matches = selector_index.get(cls_name, [])
-            for sel_qn, sel_file in matches:
-                store.upsert_edge(EdgeInfo(
-                    kind="STYLES",
-                    source=node.qualified_name,
-                    target=sel_qn,
-                    file_path=node.file_path,
-                    line=node.line_start or 0,
-                    extra={
-                        "class_name": cls_name,
-                        "resolution": "static",
-                    },
-                ))
-                count += 1
-
     # Link CSS Module references
     module_nodes = store.get_nodes_by_extra_pattern('%"css_module_refs"%')
-    for node in module_nodes:
-        refs = node.extra.get("css_module_refs", [])
-        # Find the File node for CSS module imports
-        file_nodes = store.get_nodes_by_extra_pattern(
+    # Map of file_path → {import name: module path}, built once for all nodes
+    file_mod_imports: dict[str, dict[str, str]] = {}
+    if module_nodes:
+        for fn in store.get_nodes_by_extra_pattern(
             '%"css_module_imports"%', kind="File",
-        )
-        # Build a map of import names → module paths per file
-        file_mod_imports: dict[str, dict[str, str]] = {}
-        for fn in file_nodes:
+        ):
             file_mod_imports[fn.file_path] = fn.extra.get(
                 "css_module_imports", {},
             )
-
+    for node in module_nodes:
+        refs = node.extra.get("css_module_refs", [])
         mod_imports = file_mod_imports.get(node.file_path, {})
         for ref in refs:
             imp_name = ref.get("import", "")
@@ -952,7 +960,9 @@ def link_css_styles(store: GraphStore) -> int:
     return count
 
 
-def detect_cross_file_conflicts(store: GraphStore) -> int:
+def detect_cross_file_conflicts(
+    store: GraphStore, selectors: list | None = None,
+) -> int:
     """Detect potential CSS conflicts across files.
 
     Scans for CSS selectors across different files that target the same
@@ -964,9 +974,8 @@ def detect_cross_file_conflicts(store: GraphStore) -> int:
 
     store.delete_edges_by_kind("POTENTIAL_CONFLICT")
 
-    selectors = store.get_nodes_by_extra_pattern(
-        '%"css_kind":%"selector"%', kind="Class",
-    )
+    if selectors is None:
+        selectors = _get_css_selectors(store)
 
     # Group by bare class name
     by_class: dict[str, list[tuple[str, str, list]]] = {}
@@ -1101,19 +1110,12 @@ def full_build(
                 if i % 200 == 0 or i == file_count:
                     logger.info("Progress: %d/%d files parsed", i, file_count)
 
-    # Post-build: cross-file CSS linking and conflict detection
-    styles_count = link_css_styles(store)
-    conflicts_count = detect_cross_file_conflicts(store)
-    logger.info(
-        "CSS linking: %d STYLES edges, %d POTENTIAL_CONFLICT edges",
-        styles_count, conflicts_count,
-    )
-
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
     _store_vcs_metadata(repo_root, store)
     store.commit()
 
+    css_stats = _run_css_resolver(store)
     rescript_stats = _run_rescript_resolver(store)
     spring_stats = _run_spring_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
@@ -1122,8 +1124,8 @@ def full_build(
         "files_parsed": len(files),
         "total_nodes": total_nodes,
         "total_edges": total_edges,
-        "styles_edges": styles_count,
-        "conflict_edges": conflicts_count,
+        "styles_edges": (css_stats or {}).get("styles_edges"),
+        "conflict_edges": (css_stats or {}).get("conflict_edges"),
         "errors": errors,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
@@ -1241,16 +1243,17 @@ def incremental_update(
                 total_nodes += len(nodes)
                 total_edges += len(edges)
 
-    # Post-build: cross-file CSS linking and conflict detection
-    styles_count = link_css_styles(store)
-    conflicts_count = detect_cross_file_conflicts(store)
-
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "incremental")
     _store_vcs_metadata(repo_root, store)
     store.commit()
 
     # Only re-run language-specific resolvers when the relevant files changed.
+    css_changed = any(
+        rp.endswith(_CSS_RELEVANT_EXTENSIONS) for rp in all_files
+    )
+    css_stats = _run_css_resolver(store) if css_changed else None
+
     rescript_changed = any(
         rp.endswith((".res", ".resi")) for rp in all_files
     )
@@ -1266,8 +1269,8 @@ def incremental_update(
         "files_updated": len(all_files),
         "total_nodes": total_nodes,
         "total_edges": total_edges,
-        "styles_edges": styles_count,
-        "conflict_edges": conflicts_count,
+        "styles_edges": (css_stats or {}).get("styles_edges"),
+        "conflict_edges": (css_stats or {}).get("conflict_edges"),
         "changed_files": list(changed_files),
         "dependent_files": list(dependent_files),
         "errors": errors,

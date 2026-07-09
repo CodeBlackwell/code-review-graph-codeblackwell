@@ -36,6 +36,16 @@ _QUERY_PATTERNS = {
     "file_summary": "Get a summary of all nodes in a file",
 }
 
+# CSS patterns that are a pure (edge kind, direction) walk: follow edges of
+# `kind` in each listed direction and return the node at the far endpoint.
+_EDGE_WALK_PATTERNS = {
+    "overrides_of": ("OVERRIDES", ("source",)),
+    "overridden_by": ("OVERRIDES", ("target",)),
+    "styles_of": ("STYLES", ("source",)),
+    "styled_by": ("STYLES", ("target",)),
+    "conflicts_of": ("POTENTIAL_CONFLICT", ("source", "target")),
+}
+
 
 def get_impact_radius(
     changed_files: list[str] | None = None,
@@ -332,50 +342,23 @@ def query_graph(
                             results.append(node_to_dict(child))
                         edges_out.append(edge_to_dict(e))
 
-        elif pattern == "overrides_of":
-            for e in store.get_edges_by_source(qn):
-                if e.kind == "OVERRIDES":
-                    overridden = store.get_node(e.target_qualified)
-                    if overridden:
-                        results.append(node_to_dict(overridden))
-                    edges_out.append(edge_to_dict(e))
-
-        elif pattern == "overridden_by":
-            for e in store.get_edges_by_target(qn):
-                if e.kind == "OVERRIDES":
-                    overrider = store.get_node(e.source_qualified)
-                    if overrider:
-                        results.append(node_to_dict(overrider))
-                    edges_out.append(edge_to_dict(e))
-
-        elif pattern == "styles_of":
-            for e in store.get_edges_by_source(qn):
-                if e.kind == "STYLES":
-                    styled = store.get_node(e.target_qualified)
-                    if styled:
-                        results.append(node_to_dict(styled))
-                    edges_out.append(edge_to_dict(e))
-
-        elif pattern == "styled_by":
-            for e in store.get_edges_by_target(qn):
-                if e.kind == "STYLES":
-                    styler = store.get_node(e.source_qualified)
-                    if styler:
-                        results.append(node_to_dict(styler))
-                    edges_out.append(edge_to_dict(e))
-
-        elif pattern == "conflicts_of":
-            for e in store.get_edges_by_source(qn):
-                if e.kind == "POTENTIAL_CONFLICT":
-                    conflict = store.get_node(e.target_qualified)
-                    if conflict:
-                        results.append(node_to_dict(conflict))
-                    edges_out.append(edge_to_dict(e))
-            for e in store.get_edges_by_target(qn):
-                if e.kind == "POTENTIAL_CONFLICT":
-                    conflict = store.get_node(e.source_qualified)
-                    if conflict:
-                        results.append(node_to_dict(conflict))
+        elif pattern in _EDGE_WALK_PATTERNS:
+            kind, directions = _EDGE_WALK_PATTERNS[pattern]
+            for direction in directions:
+                if direction == "source":
+                    edges_iter = store.get_edges_by_source(qn)
+                else:
+                    edges_iter = store.get_edges_by_target(qn)
+                for e in edges_iter:
+                    if e.kind != kind:
+                        continue
+                    far_qn = (
+                        e.target_qualified if direction == "source"
+                        else e.source_qualified
+                    )
+                    far_node = store.get_node(far_qn)
+                    if far_node:
+                        results.append(node_to_dict(far_node))
                     edges_out.append(edge_to_dict(e))
 
         elif pattern == "file_summary":

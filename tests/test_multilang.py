@@ -2788,7 +2788,7 @@ class TestVueTemplateClassExtraction:
 
     def test_extracts_static_classes(self):
         file_node = [n for n in self.nodes if n.kind == "File"][0]
-        classes = file_node.extra.get("vue_template_classes", [])
+        classes = file_node.extra.get("css_classes", [])
         assert "container" in classes
         assert "main-layout" in classes
         assert "title" in classes
@@ -2797,7 +2797,7 @@ class TestVueTemplateClassExtraction:
     def test_skips_dynamic_class(self):
         """Dynamic :class bindings should not appear in static class list."""
         file_node = [n for n in self.nodes if n.kind == "File"][0]
-        classes = file_node.extra.get("vue_template_classes", [])
+        classes = file_node.extra.get("css_classes", [])
         assert "active" not in classes
 
     def test_vue_has_style_selectors(self):
