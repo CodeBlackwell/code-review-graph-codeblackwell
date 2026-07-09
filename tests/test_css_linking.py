@@ -87,6 +87,31 @@ function App() {
             finally:
                 store.close()
 
+    def test_svelte_same_file_styles_edge(self):
+        """Svelte markup class + inline <style> should create STYLES edge."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            store = _build_graph_from_files(tmp_dir, {
+                "Widget.svelte": b'''<script>
+  let count = 0;
+</script>
+<div class="counter">{count}</div>
+<style>
+.counter { padding: 4px; }
+</style>
+''',
+            })
+            try:
+                edges = store.get_all_edges()
+                styles = [e for e in edges if e.kind == "STYLES"]
+                assert len(styles) >= 1
+                assert any(
+                    e.extra.get("class_name") == "counter"
+                    for e in styles
+                )
+            finally:
+                store.close()
+
     def test_no_styles_edge_for_missing_selector(self):
         """className with no matching CSS should NOT create STYLES edge."""
         with tempfile.TemporaryDirectory() as tmp:

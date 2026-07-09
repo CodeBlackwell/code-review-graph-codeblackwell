@@ -2132,7 +2132,51 @@ class CodeParser:
             all_edges.extend(edges)
 
         # Extract <style> blocks and delegate to CSS/SCSS parser
+        style_nodes, style_edges = self._extract_style_blocks(
+            tree.root_node, path, "vue",
+        )
+        all_nodes.extend(style_nodes)
+        all_edges.extend(style_edges)
+
+        # Extract static class names from <template> elements
         for child in tree.root_node.children:
+            if child.type == "template_element":
+                template_classes = self._extract_vue_template_classes(child)
+                if template_classes:
+                    all_nodes[0].extra["vue_template_classes"] = sorted(
+                        set(template_classes),
+                    )
+                break  # Only one <template> per SFC
+
+        # Generate TESTED_BY edges
+        if test_file:
+            test_qnames = set()
+            for n in all_nodes:
+                if n.is_test:
+                    qn = self._qualify(n.name, n.file_path, n.parent_name)
+                    test_qnames.add(qn)
+            for edge in list(all_edges):
+                if edge.kind == "CALLS" and edge.source in test_qnames:
+                    all_edges.append(EdgeInfo(
+                        kind="TESTED_BY",
+                        source=edge.target,
+                        target=edge.source,
+                        file_path=edge.file_path,
+                        line=edge.line,
+                    ))
+
+        return all_nodes, all_edges
+
+    def _extract_style_blocks(
+        self, root, path: Path, container_language: str,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Extract <style> blocks from an SFC AST (Vue/Svelte) and delegate
+        each to the CSS/SCSS parser. Returns nodes/edges with line numbers
+        offset to the enclosing file and language set to the container's."""
+        all_nodes: list[NodeInfo] = []
+        all_edges: list[EdgeInfo] = []
+
+        for child in root.children:
             if child.type != "style_element":
                 continue
 
@@ -2175,37 +2219,10 @@ class CodeParser:
             # Remove the File node that _parse_css creates (we already have one)
             style_nodes = [n for n in style_nodes if n.kind != "File"]
             for sn in style_nodes:
-                sn.language = "vue"
+                sn.language = container_language
 
             all_nodes.extend(style_nodes)
             all_edges.extend(style_edges)
-
-        # Extract static class names from <template> elements
-        for child in tree.root_node.children:
-            if child.type == "template_element":
-                template_classes = self._extract_vue_template_classes(child)
-                if template_classes:
-                    all_nodes[0].extra["vue_template_classes"] = sorted(
-                        set(template_classes),
-                    )
-                break  # Only one <template> per SFC
-
-        # Generate TESTED_BY edges
-        if test_file:
-            test_qnames = set()
-            for n in all_nodes:
-                if n.is_test:
-                    qn = self._qualify(n.name, n.file_path, n.parent_name)
-                    test_qnames.add(qn)
-            for edge in list(all_edges):
-                if edge.kind == "CALLS" and edge.source in test_qnames:
-                    all_edges.append(EdgeInfo(
-                        kind="TESTED_BY",
-                        source=edge.target,
-                        target=edge.source,
-                        file_path=edge.file_path,
-                        line=edge.line,
-                    ))
 
         return all_nodes, all_edges
 
@@ -2314,6 +2331,26 @@ class CodeParser:
 
             all_nodes.extend(nodes)
             all_edges.extend(edges)
+
+        # Extract <style> blocks and delegate to CSS/SCSS parser
+        style_nodes, style_edges = self._extract_style_blocks(
+            tree.root_node, path, "svelte",
+        )
+        all_nodes.extend(style_nodes)
+        all_edges.extend(style_edges)
+
+        # Extract static class names from markup elements. Svelte markup
+        # lives at the document root (no <template> wrapper), so walk every
+        # top-level element. class:foo directives parse as attributes named
+        # "class:foo" and are skipped by the walker's exact "class" match.
+        markup_classes: list[str] = []
+        for child in tree.root_node.children:
+            if child.type == "element":
+                markup_classes.extend(
+                    self._extract_vue_template_classes(child),
+                )
+        if markup_classes:
+            all_nodes[0].extra["css_classes"] = sorted(set(markup_classes))
 
         # Generate TESTED_BY edges
         if test_file:
@@ -6520,7 +6557,7 @@ class CodeParser:
             if module.startswith("."):
                 # Relative import — resolve from caller's directory
                 base = caller_dir / module
-                extensions = [".ts", ".tsx", ".js", ".jsx", ".vue", ".css", ".scss"]
+                extensions = [".ts", ".tsx", ".js", ".jsx", ".vue", ".css", ".scss", ".less"]
                 # Try exact path first (might already have extension)
                 if base.is_file():
                     return str(base.resolve())
@@ -6541,10 +6578,10 @@ class CodeParser:
                 if resolved:
                     return resolved
 
-        elif language in ("css", "scss"):
+        elif language in ("css", "scss", "less"):
             if module.startswith(".") or module.startswith("/"):
                 base = caller_dir / module
-                extensions = [".css", ".scss"]
+                extensions = [".css", ".scss", ".less"]
                 if base.is_file():
                     return str(base.resolve())
                 for ext in extensions:
