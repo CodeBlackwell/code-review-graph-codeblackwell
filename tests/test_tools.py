@@ -1306,7 +1306,7 @@ class TestBuildPostprocess:
         assert "communities_detected" not in result
         assert "fts_indexed" not in result
 
-    def test_postprocess_minimal_has_fts_no_flows(self):
+    def test_postprocess_minimal_has_fts_no_flows(self, capsys):
         from unittest.mock import patch
 
         from code_review_graph.tools.build import build_or_update_graph
@@ -1324,8 +1324,15 @@ class TestBuildPostprocess:
         assert result.get("signatures_updated") is True
         assert "flows_detected" not in result
         assert "communities_detected" not in result
+        timing = result["postprocess_timing"]
+        assert set(timing) == {"signatures_s", "fts_s"}
+        assert all(
+            isinstance(value, float) and value >= 0
+            for value in timing.values()
+        )
+        assert capsys.readouterr().out == ""
 
-    def test_postprocess_full_matches_default(self):
+    def test_postprocess_full_matches_default(self, capsys):
         from unittest.mock import patch
 
         from code_review_graph.tools.build import build_or_update_graph
@@ -1343,6 +1350,19 @@ class TestBuildPostprocess:
         # Full postprocess should have flows and communities
         assert "flows_detected" in result
         assert "communities_detected" in result
+        timing = result["postprocess_timing"]
+        assert set(timing) == {
+            "signatures_s",
+            "fts_s",
+            "flows_s",
+            "communities_s",
+            "summaries_s",
+        }
+        assert all(
+            isinstance(value, float) and value >= 0
+            for value in timing.values()
+        )
+        assert capsys.readouterr().out == ""
 
 
 class TestComputeSummaries:
