@@ -128,6 +128,8 @@ DEFAULT_IGNORE_PATTERNS = [
     # Dart / Flutter
     "**/.dart_tool/**",
     "**/.pub-cache/**",
+    # AWS CDK
+    "**/cdk.out/**",
     # General
     "/coverage/**",
     "**/.cache/**",

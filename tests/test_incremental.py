@@ -268,6 +268,15 @@ class TestIgnorePatterns:
                 patterns,
             )
 
+    def test_cdk_output_default_matches_at_any_depth(self):
+        """AWS CDK synth output is generated in root and monorepo projects."""
+        from code_review_graph.incremental import DEFAULT_IGNORE_PATTERNS
+
+        patterns = DEFAULT_IGNORE_PATTERNS
+        assert _should_ignore("cdk.out/manifest.json", patterns)
+        assert _should_ignore("packages/infra/cdk.out/asset.js", patterns)
+        assert not _should_ignore("packages/infra/cdk.output/source.ts", patterns)
+
     def test_safe_dependency_defaults_still_match_at_any_depth(self):
         """The monorepo dependency case from #91 remains fixed."""
         from code_review_graph.incremental import DEFAULT_IGNORE_PATTERNS
