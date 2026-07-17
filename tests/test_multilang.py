@@ -701,6 +701,37 @@ class TestPHPParsing:
         # Global namespaced calls should normalize to a stable name
         assert "dirname" in target_names
 
+    def test_finds_extended_php_types_bases_and_object_creation(self):
+        source = b"""<?php
+trait Auditable {}
+enum Status: string { case Active = 'active'; }
+interface Contract {}
+
+class Service extends \\Framework\\Base implements Contract, \\Other\\Marker {
+    public function run(): void {
+        $worker = new \\App\\Worker();
+        $worker->save();
+        Service::factory();
+    }
+}
+"""
+
+        nodes, edges = self.parser.parse_bytes(Path("extended.php"), source)
+
+        class_names = {node.name for node in nodes if node.kind == "Class"}
+        assert {"Auditable", "Status", "Contract", "Service"} <= class_names
+
+        inherited = {edge.target for edge in edges if edge.kind == "INHERITS"}
+        assert "\\Framework\\Base" in inherited
+        assert "Contract" in inherited
+        assert "\\Other\\Marker" in inherited
+
+        calls = {edge.target for edge in edges if edge.kind == "CALLS"}
+        assert "App\\Worker" in calls
+        # Existing PHP call formatting must stay unchanged.
+        assert "save" in calls
+        assert "Service::factory" in calls
+
 
 class TestPHPImportResolution:
     """PHP ``use`` imports resolve to absolute file paths (PSR-4 layout)."""
