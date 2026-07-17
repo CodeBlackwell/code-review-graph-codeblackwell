@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -462,6 +463,24 @@ class TestWatchDaemon:
             "repo_b": repo_b,
             "config_file": config_file,
         }
+
+    def test_sigterm_handler_stops_daemon_and_exits(self, daemon_env):
+        daemon = daemon_env["daemon"]
+        handlers = {}
+
+        with (
+            patch(
+                "code_review_graph.daemon.signal.signal",
+                side_effect=lambda sig, handler: handlers.__setitem__(sig, handler),
+            ),
+            patch.object(daemon, "stop") as stop,
+        ):
+            daemon._setup_signal_handlers()
+            with pytest.raises(SystemExit) as exc_info:
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        assert exc_info.value.code == 0
+        stop.assert_called_once_with()
 
     @patch("code_review_graph.daemon.subprocess.Popen")
     @patch("code_review_graph.registry.Registry")
@@ -1072,6 +1091,71 @@ class TestDaemonCLI:
             _handle_start(args)
 
         assert exc_info.value.code == 1
+
+    def test_handle_start_foreground_sets_lifecycle_before_children(self):
+        """Foreground mode owns a PID and handlers before spawning threads."""
+        from code_review_graph.daemon_cli import _handle_start
+
+        args = MagicMock(foreground=True)
+        daemon = MagicMock()
+        events: list[str] = []
+        daemon._setup_signal_handlers.side_effect = lambda: events.append("signals")
+        daemon.start.side_effect = lambda: events.append("start")
+        daemon.run_forever.side_effect = lambda: events.append("run")
+        daemon.stop.side_effect = lambda: events.append("stop")
+
+        with (
+            patch("code_review_graph.daemon.is_daemon_running", return_value=False),
+            patch("code_review_graph.daemon.load_config", return_value=DaemonConfig()),
+            patch("code_review_graph.daemon.WatchDaemon", return_value=daemon),
+            patch(
+                "code_review_graph.daemon.write_pid",
+                side_effect=lambda: events.append("pid"),
+            ),
+        ):
+            _handle_start(args)
+
+        assert events == ["pid", "signals", "start", "run", "stop"]
+        daemon.daemonize.assert_not_called()
+
+    def test_handle_start_daemonizes_before_spawning_children(self):
+        """POSIX daemonization must happen before watcher/background threads."""
+        from code_review_graph.daemon_cli import _handle_start
+
+        args = MagicMock(foreground=False)
+        daemon = MagicMock()
+        events: list[str] = []
+        daemon.daemonize.side_effect = lambda: events.append("daemonize")
+        daemon.start.side_effect = lambda: events.append("start")
+        daemon.run_forever.side_effect = lambda: events.append("run")
+        daemon.stop.side_effect = lambda: events.append("stop")
+
+        with (
+            patch("code_review_graph.daemon.is_daemon_running", return_value=False),
+            patch("code_review_graph.daemon.load_config", return_value=DaemonConfig()),
+            patch("code_review_graph.daemon.WatchDaemon", return_value=daemon),
+        ):
+            _handle_start(args)
+
+        assert events == ["daemonize", "start", "run", "stop"]
+
+    def test_handle_start_cleans_up_pid_when_startup_fails(self):
+        from code_review_graph.daemon_cli import _handle_start
+
+        args = MagicMock(foreground=True)
+        daemon = MagicMock()
+        daemon.start.side_effect = RuntimeError("watcher startup failed")
+
+        with (
+            patch("code_review_graph.daemon.is_daemon_running", return_value=False),
+            patch("code_review_graph.daemon.load_config", return_value=DaemonConfig()),
+            patch("code_review_graph.daemon.WatchDaemon", return_value=daemon),
+            patch("code_review_graph.daemon.write_pid"),
+            pytest.raises(RuntimeError, match="watcher startup failed"),
+        ):
+            _handle_start(args)
+
+        daemon.stop.assert_called_once_with()
 
     def test_handle_logs_missing_file(self, tmp_path):
         """_handle_logs exits when log file does not exist."""
