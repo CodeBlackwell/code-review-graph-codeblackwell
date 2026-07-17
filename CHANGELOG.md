@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- Corrected TESTED_BY edge direction across graph, refactor, and transitive-test
+  consumers, with a parser-to-store-to-query regression (#527/#559/#598 class).
+- C# receiver calls now capture bare, chained, member, and null-conditional
+  invocations with caller attribution (#612); Kotlin/C# annotations and C#
+  namespace importer resolution—including nested namespaces—are also preserved
+  (#295/#310, PR #353).
+- Restored advertised Zig structure, calls, imports, and test nodes, including
+  TESTED_BY edges for test blocks embedded in ordinary source files (PR #393).
+- Hardened generated skills/configuration: uppercase `SKILL.md` (PR #563),
+  string-safe JSONC plus top-level and nested-container data-preservation guards
+  (#553, PR #354), portable PATH-aware hooks (PR #565), and Windows Codex hook
+  commands (#620/PR #621).
+- Packaged documentation remains reachable through the MCP wrapper (#613),
+  Action comments render repository-relative paths, and both visualization
+  templates select the graph SVG specifically (PR #564).
 - **PHP `use` imports now resolve to files** (`importers_of`, impact radius,
   call disambiguation): PHP `use` statements had no branch in the parser's
   import extraction and fell through to the raw-text fallback, storing the whole
