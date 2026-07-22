@@ -198,6 +198,29 @@ def test_incremental_rename_repoints(tmp_path, monkeypatch):
     assert not any("old.module.css" in t for _, t, _ in edges)
 
 
+def test_param_shadowed_styles_no_edge(tmp_path, monkeypatch):
+    # S4a: a function parameter named ``styles`` shadows the import.
+    (tmp_path / "s.module.css").write_text(".foo { color: red; }\n")
+    (tmp_path / "Comp.tsx").write_text(
+        "import styles from './s.module.css';\n"
+        "export function Comp({ styles }: any) { return <div className={styles.foo}>x</div>; }\n"
+    )
+    store, stats = _build(tmp_path, monkeypatch)
+    assert stats["css_resolution"]["styles_edges"] == 0
+
+
+def test_local_const_shadowed_styles_no_edge(tmp_path, monkeypatch):
+    # S4b: a local ``const styles = ...`` shadows the import.
+    (tmp_path / "s.module.css").write_text(".foo { color: red; }\n")
+    (tmp_path / "Comp.tsx").write_text(
+        "import styles from './s.module.css';\n"
+        "export function Comp() { const styles = useTheme(); "
+        "return <div className={styles.foo}>x</div>; }\n"
+    )
+    store, stats = _build(tmp_path, monkeypatch)
+    assert stats["css_resolution"]["styles_edges"] == 0
+
+
 def test_incremental_heal_stylesheet_created_after_component(tmp_path, monkeypatch):
     # S1: component indexed while its stylesheet is missing; the stylesheet
     # appearing later must link on an incremental update of the CSS alone.

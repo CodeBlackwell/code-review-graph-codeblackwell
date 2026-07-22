@@ -2482,8 +2482,42 @@ class CodeParser:
                 elif me_child.type == "property_identifier":
                     prop = me_child.text.decode("utf-8", errors="replace")
             if obj in import_names and prop:
+                if CodeParser._css_ref_shadowed(attr, obj):
+                    return None
                 return (obj, prop, attr.start_point[0] + 1)
         return None
+
+    @staticmethod
+    def _css_ref_shadowed(node, name: str) -> bool:
+        """True when ``name`` is re-bound between ``node`` and module scope:
+        a parameter of an enclosing function, or a const/let/var declarator in
+        an enclosing block. Such a reference is not the CSS Module import."""
+        def binds(subtree) -> bool:
+            if subtree.type in ("identifier", "shorthand_property_identifier_pattern"):
+                return subtree.text.decode("utf-8", errors="replace") == name
+            return any(binds(c) for c in subtree.children)
+
+        current = node.parent
+        while current is not None:
+            if current.type in (
+                "arrow_function", "function_declaration", "function_expression",
+                "generator_function", "generator_function_declaration",
+                "method_definition", "function",
+            ):
+                params = current.child_by_field_name("parameters")
+                if params is not None and binds(params):
+                    return True
+            elif current.type == "statement_block":
+                for stmt in current.children:
+                    if stmt.type not in ("lexical_declaration", "variable_declaration"):
+                        continue
+                    for decl in stmt.children:
+                        if decl.type == "variable_declarator":
+                            target = decl.child_by_field_name("name")
+                            if target is not None and binds(target):
+                                return True
+            current = current.parent
+        return False
 
     @staticmethod
     def _innermost_node_at(
