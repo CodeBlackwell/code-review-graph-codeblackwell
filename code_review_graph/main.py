@@ -261,6 +261,8 @@ def query_graph_tool(
     - handlers_of: Find methods that handle an endpoint
     - endpoints_for: Find endpoints handled by a method
     - consumers_of: Find classes that consume a Spring configuration property
+    - styles_of: Find CSS selectors that style the target component
+    - styled_by: Find components styled by the target CSS selector
     - file_summary: Get all nodes in a file
 
     Args:

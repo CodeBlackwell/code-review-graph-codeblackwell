@@ -663,6 +663,8 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".scala": "scala",
     ".sol": "solidity",
     ".vue": "vue",
+    ".css": "css",
+    ".scss": "scss",
     ".dart": "dart",
     ".r": "r",  # .lower() in detect_language handles .R → .r
     ".mjs": "javascript",
@@ -2388,6 +2390,10 @@ class CodeParser:
         if language == "svelte":
             return self._parse_svelte(path, source)
 
+        # Stylesheets: selectors become graph nodes; @import/@use chains resolve.
+        if language in ("css", "scss"):
+            return self._parse_css(path, source)
+
         # Jupyter notebooks: extract code cells and parse as Python
         if language == "notebook":
             return self._parse_notebook(path, source)
@@ -2541,7 +2547,165 @@ class CodeParser:
                         line=edge.line,
                     ))
 
+        if language in ("javascript", "typescript", "tsx"):
+            self._attach_css_module_refs(
+                tree.root_node, file_path_str, nodes, import_map,
+            )
+
         return nodes, edges
+
+    def _attach_css_module_refs(
+        self, root, file_path: str,
+        nodes: list[NodeInfo], import_map: dict[str, str],
+    ) -> None:
+        """Record CSS Module usage (``className={styles.foo}``) for later
+        import-scoped STYLES linking.
+
+        The importing file's ``css_module_imports`` maps each imported name to
+        the RAW import string; each ``styles.foo`` reference is attached to the
+        innermost enclosing component node. Module-to-file resolution happens at
+        link time in css_resolver so a stylesheet that appears (or is renamed)
+        after this file was indexed still links on the next update.
+        """
+        module_imports: dict[str, str] = {
+            name: module for name, module in import_map.items()
+            if ".module.css" in module or ".module.scss" in module
+        }
+        if not module_imports:
+            return
+        nodes[0].extra["css_module_imports"] = module_imports
+
+        refs = self._collect_jsx_module_refs(root, set(module_imports))
+        if not refs:
+            return
+        components = [n for n in nodes if n.kind != "File"]
+        for imp_name, prop, line in refs:
+            enclosing = self._innermost_node_at(components, line) or nodes[0]
+            enclosing.extra.setdefault("css_module_refs", []).append(
+                {"import": imp_name, "property": prop},
+            )
+
+    def _collect_jsx_module_refs(
+        self, root, import_names: set[str],
+    ) -> list[tuple[str, str, int]]:
+        """Find ``className={styles.foo}`` references, returning
+        (import_name, property, line) tuples."""
+        refs: list[tuple[str, str, int]] = []
+
+        def walk(node):
+            if node.type == "jsx_attribute":
+                ref = self._jsx_module_ref(node, import_names)
+                if ref:
+                    refs.append(ref)
+            for child in node.children:
+                walk(child)
+
+        walk(root)
+        return refs
+
+    @staticmethod
+    def _jsx_module_ref(attr, import_names: set[str]):
+        """Extract (import_name, property, line) from a
+        ``className={styles.foo}`` jsx_attribute, or None."""
+        attr_name = None
+        value = None
+        for child in attr.children:
+            if child.type == "property_identifier":
+                attr_name = child.text.decode("utf-8", errors="replace")
+            elif child.type == "jsx_expression":
+                value = child
+        if attr_name not in ("className", "class") or value is None:
+            return None
+        for expr_child in value.children:
+            if expr_child.type != "member_expression":
+                continue
+            obj = prop = None
+            for me_child in expr_child.children:
+                if me_child.type == "identifier":
+                    obj = me_child.text.decode("utf-8", errors="replace")
+                elif me_child.type == "property_identifier":
+                    prop = me_child.text.decode("utf-8", errors="replace")
+            if obj in import_names and prop:
+                if CodeParser._css_ref_shadowed(attr, obj):
+                    return None
+                return (obj, prop, attr.start_point[0] + 1)
+        return None
+
+    @staticmethod
+    def _css_ref_shadowed(node, name: str) -> bool:
+        """True when ``name`` is re-bound between ``node`` and module scope:
+        a function/catch parameter, a loop binding, or a const/let/var
+        declarator in an enclosing block. Such a reference is not the CSS
+        Module import. Only binding positions count — an identifier inside a
+        parameter default value or a TS type annotation never shadows."""
+        def binds(pat) -> bool:
+            if pat is None:
+                return False
+            t = pat.type
+            if t in ("identifier", "shorthand_property_identifier_pattern"):
+                return pat.text.decode("utf-8", errors="replace") == name
+            if t in ("required_parameter", "optional_parameter"):
+                return binds(pat.child_by_field_name("pattern"))
+            if t in ("assignment_pattern", "object_assignment_pattern"):
+                return binds(pat.child_by_field_name("left"))
+            if t == "pair_pattern":
+                return binds(pat.child_by_field_name("value"))
+            if t in (
+                "formal_parameters", "object_pattern", "array_pattern",
+                "rest_pattern",
+            ):
+                return any(binds(c) for c in pat.named_children)
+            return False
+
+        def declares(stmt) -> bool:
+            if stmt.type not in ("lexical_declaration", "variable_declaration"):
+                return False
+            return any(
+                binds(d.child_by_field_name("name"))
+                for d in stmt.named_children if d.type == "variable_declarator"
+            )
+
+        current = node.parent
+        while current is not None:
+            t = current.type
+            if t in (
+                "arrow_function", "function_declaration", "function_expression",
+                "generator_function", "generator_function_declaration",
+                "method_definition", "function",
+            ):
+                # Arrow functions expose a bare param via the singular field.
+                if binds(current.child_by_field_name("parameters")) or binds(
+                    current.child_by_field_name("parameter"),
+                ):
+                    return True
+            elif t == "statement_block":
+                if any(declares(s) for s in current.named_children):
+                    return True
+            elif t == "for_statement":
+                init = current.child_by_field_name("initializer")
+                if init is not None and declares(init):
+                    return True
+            elif t == "for_in_statement":
+                if binds(current.child_by_field_name("left")):
+                    return True
+            elif t == "catch_clause":
+                if binds(current.child_by_field_name("parameter")):
+                    return True
+            current = current.parent
+        return False
+
+    @staticmethod
+    def _innermost_node_at(
+        candidates: list[NodeInfo], line: int,
+    ) -> Optional[NodeInfo]:
+        """Return the smallest-span node whose line range contains ``line``."""
+        best = None
+        for node in candidates:
+            if node.line_start <= line <= node.line_end:
+                span = node.line_end - node.line_start
+                if best is None or span < (best.line_end - best.line_start):
+                    best = node
+        return best
 
     @classmethod
     def _mask_blade_comments(cls, text: str) -> str:
@@ -2697,6 +2861,9 @@ class CodeParser:
                         line=edge.line,
                     ))
 
+        self._extract_sfc_styles(
+            tree.root_node, file_path_str, False, all_nodes, all_edges,
+        )
         return all_nodes, all_edges
 
     def _parse_svelte(
@@ -2827,7 +2994,242 @@ class CodeParser:
                         line=edge.line,
                     ))
 
+        self._extract_sfc_styles(
+            tree.root_node, file_path_str, True, all_nodes, all_edges,
+        )
         return all_nodes, all_edges
+
+    # ------------------------------------------------------------------
+    # Stylesheets (.css / .scss and SFC <style> blocks)
+    # ------------------------------------------------------------------
+
+    def _css_scope_for_path(self, path: Path) -> str:
+        """CSS Modules (``*.module.css``) are locally scoped; everything else
+        is a plain global stylesheet."""
+        return "module" if ".module." in path.name else "global"
+
+    def _parse_css(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse a standalone stylesheet into scope-tagged selector nodes.
+
+        Each selector becomes a Class node carrying ``css_kind='selector'``, a
+        ``scope`` (module | global), and a per-file occurrence ordinal so
+        repeated selectors stay distinct nodes. Resolvable ``@import``/``@use``
+        targets become IMPORTS_FROM edges.
+        """
+        language = "scss" if path.suffix.lower() == ".scss" else "css"
+        parser = self._get_parser(language)
+        if not parser:
+            return [], []
+
+        tree = parser.parse(source)
+        file_path_str = str(path)
+        scope = self._css_scope_for_path(path)
+
+        nodes: list[NodeInfo] = [NodeInfo(
+            kind="File",
+            name=file_path_str,
+            file_path=file_path_str,
+            line_start=1,
+            line_end=source.count(b"\n") + 1,
+            language=language,
+        )]
+        edges: list[EdgeInfo] = []
+        self._extract_stylesheet(
+            tree.root_node, language, file_path_str, scope,
+            parent_selector="", nodes=nodes, edges=edges,
+            counts={}, line_offset=0,
+        )
+        return nodes, edges
+
+    def _extract_sfc_styles(
+        self, root, file_path: str, always_scoped: bool,
+        nodes: list[NodeInfo], edges: list[EdgeInfo],
+    ) -> None:
+        """Parse ``<style>`` blocks of a Vue/Svelte SFC in place.
+
+        Svelte component styles (and Vue ``<style scoped>``) are tagged
+        ``scope='scoped'``; a plain Vue ``<style>`` is ``global``.
+        """
+        counts: dict[str, int] = {}
+        for child in root.children:
+            if child.type != "style_element":
+                continue
+            start_tag = None
+            raw_text = None
+            for sub in child.children:
+                if sub.type == "start_tag":
+                    start_tag = sub
+                elif sub.type == "raw_text":
+                    raw_text = sub
+            if raw_text is None:
+                continue
+
+            lang = "css"
+            scoped = always_scoped
+            if start_tag:
+                for attr in start_tag.children:
+                    if attr.type != "attribute":
+                        continue
+                    name = value = None
+                    for a in attr.children:
+                        if a.type == "attribute_name":
+                            name = a.text.decode("utf-8", errors="replace")
+                        elif a.type == "quoted_attribute_value":
+                            for v in a.children:
+                                if v.type == "attribute_value":
+                                    value = v.text.decode("utf-8", errors="replace")
+                    if name == "scoped":
+                        scoped = True
+                    elif name == "lang" and value:
+                        # Only css/scss have grammars here; indented Sass,
+                        # Less, etc. are skipped rather than mis-parsed.
+                        lang = value if value in ("css", "scss") else None
+
+            if lang is None:
+                continue
+            style_parser = self._get_parser(lang)
+            if not style_parser:
+                continue
+            style_tree = style_parser.parse(raw_text.text)
+            self._extract_stylesheet(
+                style_tree.root_node, lang, file_path,
+                "scoped" if scoped else "global",
+                parent_selector="", nodes=nodes, edges=edges,
+                counts=counts, line_offset=raw_text.start_point[0],
+            )
+
+    def _extract_stylesheet(
+        self, node, language: str, file_path: str, scope: str,
+        parent_selector: str, nodes: list[NodeInfo], edges: list[EdgeInfo],
+        counts: dict[str, int], line_offset: int,
+    ) -> None:
+        """Walk a stylesheet AST, emitting selector nodes and import edges.
+
+        ``counts`` tracks per-file occurrence ordinals across the whole file so
+        the same selector text in nested/repeated rules yields distinct nodes.
+        """
+        for child in node.children:
+            ctype = child.type
+            if ctype == "rule_set":
+                self._handle_rule_set(
+                    child, language, file_path, scope, parent_selector,
+                    nodes, edges, counts, line_offset,
+                )
+            elif ctype in ("import_statement", "use_statement"):
+                self._handle_css_import(child, language, file_path, edges, line_offset)
+            else:
+                # @media / @supports and other wrappers nest rule_sets inside.
+                self._extract_stylesheet(
+                    child, language, file_path, scope, parent_selector,
+                    nodes, edges, counts, line_offset,
+                )
+
+    def _handle_rule_set(
+        self, rule_set, language: str, file_path: str, scope: str,
+        parent_selector: str, nodes: list[NodeInfo], edges: list[EdgeInfo],
+        counts: dict[str, int], line_offset: int,
+    ) -> None:
+        selectors_node = None
+        block = None
+        for sub in rule_set.children:
+            if sub.type == "selectors":
+                selectors_node = sub
+            elif sub.type == "block":
+                block = sub
+
+        texts = (
+            self._css_selector_texts(selectors_node, parent_selector)
+            if selectors_node else []
+        )
+        line = rule_set.start_point[0] + 1 + line_offset
+        end_line = rule_set.end_point[0] + 1 + line_offset
+        for text in texts:
+            ordinal = counts.get(text, 0)
+            counts[text] = ordinal + 1
+            display = text if ordinal == 0 else f"{text}#{ordinal}"
+            nodes.append(NodeInfo(
+                kind="Class",
+                name=display,
+                file_path=file_path,
+                line_start=line,
+                line_end=end_line,
+                language=language,
+                extra={"css_kind": "selector", "scope": scope, "selector": text},
+            ))
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=file_path,
+                target=self._qualify(display, file_path, None),
+                file_path=file_path,
+                line=line,
+            ))
+
+        # SCSS nesting: descend into the block, resolving & against this rule.
+        if block is not None:
+            nested_parent = texts[0] if texts else parent_selector
+            self._extract_stylesheet(
+                block, language, file_path, scope, nested_parent,
+                nodes, edges, counts, line_offset,
+            )
+
+    @staticmethod
+    def _css_selector_texts(selectors_node, parent_selector: str) -> list[str]:
+        """Split a comma group into individual selector strings, resolving the
+        SCSS ``&`` nesting marker against the parent selector."""
+        groups: list[list] = []
+        current: list = []
+        for child in selectors_node.children:
+            if child.type == ",":
+                if current:
+                    groups.append(current)
+                    current = []
+            else:
+                current.append(child)
+        if current:
+            groups.append(current)
+
+        texts: list[str] = []
+        for group in groups:
+            raw = " ".join(
+                part.text.decode("utf-8", errors="replace") for part in group
+            )
+            raw = re.sub(r"\s+", " ", raw).strip()
+            if "&" in raw and parent_selector:
+                raw = raw.replace("&", parent_selector)
+            if raw:
+                texts.append(raw)
+        return texts
+
+    def _handle_css_import(
+        self, stmt, language: str, file_path: str,
+        edges: list[EdgeInfo], line_offset: int,
+    ) -> None:
+        """Emit an IMPORTS_FROM edge only when the @import/@use target resolves
+        to a real file — unresolved targets are left out, never dangling."""
+        target = None
+        for child in stmt.children:
+            if child.type == "string_value":
+                for sub in child.children:
+                    if sub.type == "string_content":
+                        target = sub.text.decode("utf-8", errors="replace")
+                        break
+                if target is None:
+                    target = child.text.decode("utf-8", errors="replace").strip("'\"")
+                break
+        if not target:
+            return
+        resolved = self._resolve_module_to_file(target, file_path, language)
+        if not resolved:
+            return
+        edges.append(EdgeInfo(
+            kind="IMPORTS_FROM",
+            source=file_path,
+            target=resolved,
+            file_path=file_path,
+            line=stmt.start_point[0] + 1 + line_offset,
+        ))
 
     def _parse_notebook(
         self, path: Path, source: bytes,
@@ -12409,6 +12811,25 @@ class CodeParser:
                 resolved = self._tsconfig_resolver.resolve_alias(module, file_path)
                 if resolved:
                     return resolved
+
+        elif language in ("css", "scss"):
+            # @import / @use targets resolve relative to the caller. SCSS bare
+            # names (`@use "variables"`) are relative too; URLs, `sass:` built-ins,
+            # and `~`-prefixed package aliases stay unresolved.
+            if ":" not in module and not module.startswith("~"):
+                base = caller_dir / module
+                extensions = [".scss", ".css"]
+                if base.is_file():
+                    return str(base.resolve())
+                for ext in extensions:
+                    target = base.with_suffix(ext)
+                    if target.is_file():
+                        return str(target.resolve())
+                # SCSS partials: `@use "foo"` resolves `_foo.scss`.
+                for ext in extensions:
+                    partial = base.parent / f"_{base.name}{ext}"
+                    if partial.is_file():
+                        return str(partial.resolve())
 
         elif language == "dart":
             if module.startswith("."):

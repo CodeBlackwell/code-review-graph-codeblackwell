@@ -37,6 +37,8 @@ _QUERY_PATTERNS = {
     "handlers_of": "Find methods that handle an endpoint",
     "endpoints_for": "Find endpoints handled by a method",
     "consumers_of": "Find classes that consume a Spring configuration property",
+    "styles_of": "Find CSS selectors that style a given component",
+    "styled_by": "Find components styled by a given CSS selector",
     "file_summary": "Get a summary of all nodes in a file",
 }
 
@@ -237,7 +239,8 @@ def query_graph(
         pattern: Query pattern. One of: callers_of, callees_of, imports_of,
                  importers_of, children_of, tests_for, inheritors_of,
                  triggers_of, triggered_by, publishers_of, listeners_of,
-                 handlers_of, endpoints_for, consumers_of, file_summary.
+                 handlers_of, endpoints_for, consumers_of, styles_of,
+                 styled_by, file_summary.
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
@@ -518,6 +521,24 @@ def query_graph(
                 if endpoint and endpoint.kind == "Endpoint":
                     results.append(node_to_dict(endpoint))
                     edges_out.append(edge_to_dict(edge))
+
+        elif pattern == "styles_of":
+            for edge in store.get_edges_by_source(qn):
+                if edge.kind != "STYLES":
+                    continue
+                selector = store.get_node(edge.target_qualified)
+                if selector:
+                    results.append(node_to_dict(selector))
+                edges_out.append(edge_to_dict(edge))
+
+        elif pattern == "styled_by":
+            for edge in store.get_edges_by_target(qn):
+                if edge.kind != "STYLES":
+                    continue
+                component = store.get_node(edge.source_qualified)
+                if component:
+                    results.append(node_to_dict(component))
+                edges_out.append(edge_to_dict(edge))
 
         elif pattern == "consumers_of":
             raw_key = node.name if node else target.removeprefix("config:")

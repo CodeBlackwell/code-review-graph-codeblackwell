@@ -328,6 +328,8 @@ function registerCommands(
         { label: "children_of", description: "Find nodes contained in a file or class" },
         { label: "tests_for", description: "Find tests for a function or class" },
         { label: "inheritors_of", description: "Find classes inheriting/implementing the target" },
+        { label: "styles_of", description: "Find CSS selectors that style a component" },
+        { label: "styled_by", description: "Find components styled by a CSS selector" },
         { label: "file_summary", description: "List all nodes in a file" },
       ];
 
@@ -352,6 +354,8 @@ function registerCommands(
         children_of: { edgeKind: "CONTAINS", direction: "outgoing" },
         tests_for: { edgeKind: "TESTED_BY", direction: "incoming" },
         inheritors_of: { edgeKind: "INHERITS", direction: "incoming" },
+        styles_of: { edgeKind: "STYLES", direction: "outgoing" },
+        styled_by: { edgeKind: "STYLES", direction: "incoming" },
         file_summary: { edgeKind: "CONTAINS", direction: "outgoing" },
       };
 

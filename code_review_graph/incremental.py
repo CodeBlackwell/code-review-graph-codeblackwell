@@ -113,6 +113,20 @@ def _run_temporal_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+# File extensions whose changes can affect STYLES edges.
+_CSS_RELEVANT_EXTENSIONS = (".css", ".scss", ".tsx", ".jsx", ".ts", ".js")
+
+
+def _run_css_resolver(store: GraphStore, repo_root: Path) -> Optional[dict]:
+    """Run the CSS Modules linker without failing a build."""
+    try:
+        from .css_resolver import resolve_css_styles
+        return resolve_css_styles(store, repo_root)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("CSS resolver failed: %s", exc)
+        return None
+
+
 def _run_hcl_resolver(store: GraphStore) -> Optional[dict]:
     """Run Terraform module-scope resolution without failing a build."""
     try:
@@ -986,6 +1000,7 @@ def full_build(
     spring_event_stats = _run_spring_event_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
+    css_stats = _run_css_resolver(store, repo_root)
 
     return {
         "files_parsed": len(files),
@@ -997,6 +1012,7 @@ def full_build(
         "event_resolution": spring_event_stats,
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
+        "css_resolution": css_stats,
     }
 
 
@@ -1144,6 +1160,8 @@ def incremental_update(
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
     hcl_changed = any(rp.endswith((".tf", ".hcl")) for rp in all_files)
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
+    css_changed = any(rp.endswith(_CSS_RELEVANT_EXTENSIONS) for rp in all_files)
+    css_stats = _run_css_resolver(store, repo_root) if css_changed else None
 
     return {
         "files_updated": len(all_files),
@@ -1157,6 +1175,7 @@ def incremental_update(
         "event_resolution": spring_event_stats,
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
+        "css_resolution": css_stats,
     }
 
 

@@ -117,6 +117,7 @@ const OUTGOING_EDGE_LABELS: Record<string, string> = {
   TESTED_BY: 'tested by',
   CONTAINS: 'contains',
   DEPENDS_ON: 'depends on',
+  STYLES: 'styles',
 };
 
 const INCOMING_EDGE_LABELS: Record<string, string> = {
@@ -127,6 +128,7 @@ const INCOMING_EDGE_LABELS: Record<string, string> = {
   TESTED_BY: 'tests',
   CONTAINS: 'contained in',
   DEPENDS_ON: 'depended on by',
+  STYLES: 'styled by',
 };
 
 const EDGE_ICON_MAP_OUTGOING: Record<string, string> = {
@@ -137,6 +139,7 @@ const EDGE_ICON_MAP_OUTGOING: Record<string, string> = {
   TESTED_BY: 'testing-run-icon',
   CONTAINS: 'symbol-namespace',
   DEPENDS_ON: 'references',
+  STYLES: 'paintcan',
 };
 
 const EDGE_ICON_MAP_INCOMING: Record<string, string> = {
@@ -147,6 +150,7 @@ const EDGE_ICON_MAP_INCOMING: Record<string, string> = {
   TESTED_BY: 'testing-run-icon',
   CONTAINS: 'symbol-namespace',
   DEPENDS_ON: 'references',
+  STYLES: 'paintcan',
 };
 
 function extractShortName(qualifiedName: string): string {
