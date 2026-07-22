@@ -1033,9 +1033,9 @@ def incremental_update(
     # Files whose stored hash is empty (cleared by migration v10 after the
     # symbol-identity change) must re-ingest even though git sees no change.
     stale: list[str] = []
-    for abs_path in store.files_missing_hash():
+    for hashless in store.files_missing_hash():
         try:
-            rel = str(Path(abs_path).relative_to(repo_root))
+            rel = str(Path(hashless).relative_to(repo_root))
         except ValueError:
             continue
         if (repo_root / rel).is_file():
