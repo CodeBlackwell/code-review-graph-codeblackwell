@@ -49,7 +49,8 @@ export type EdgeKind =
   | 'IMPLEMENTS'
   | 'CONTAINS'
   | 'TESTED_BY'
-  | 'DEPENDS_ON';
+  | 'DEPENDS_ON'
+  | 'STYLES';
 
 export interface GraphNode {
   id: number;

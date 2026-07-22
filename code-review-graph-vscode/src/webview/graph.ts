@@ -27,7 +27,8 @@ type EdgeKind =
   | "IMPLEMENTS"
   | "TESTED_BY"
   | "CONTAINS"
-  | "DEPENDS_ON";
+  | "DEPENDS_ON"
+  | "STYLES";
 
 interface GraphNode {
   id: number;
@@ -109,6 +110,7 @@ const EDGE_COLOR: Record<EdgeKind, string> = {
   TESTED_BY: "#f38ba8",
   CONTAINS: "rgba(139,148,158,0.15)",
   DEPENDS_ON: "#fab387",
+  STYLES: "#79c0ff",
 };
 
 const ALL_EDGE_KINDS: EdgeKind[] = [
@@ -119,6 +121,7 @@ const ALL_EDGE_KINDS: EdgeKind[] = [
   "TESTED_BY",
   "CONTAINS",
   "DEPENDS_ON",
+  "STYLES",
 ];
 
 // ---------------------------------------------------------------------------
