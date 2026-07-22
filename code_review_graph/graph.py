@@ -838,6 +838,19 @@ class GraphStore:
         ).fetchall()
         return [r["file_path"] for r in rows]
 
+    def files_missing_hash(self) -> list[str]:
+        """Indexed files whose stored hash is empty.
+
+        Migration v10 clears hashes to flag pre-identity-change data;
+        incremental updates must re-ingest these files even when git
+        reports no change to them.
+        """
+        rows = self._conn.execute(
+            "SELECT DISTINCT file_path FROM nodes "
+            "WHERE kind = 'File' AND (file_hash IS NULL OR file_hash = '')"
+        ).fetchall()
+        return [r["file_path"] for r in rows]
+
     def search_nodes(self, query: str, limit: int = 20) -> list[GraphNode]:
         """Keyword search across node names.
 
