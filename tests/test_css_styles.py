@@ -94,6 +94,32 @@ def test_unresolvable_import_produces_no_edge(tmp_path, monkeypatch):
     assert not any("cdn.example.com" in t for t in targets)
 
 
+def test_scss_ampersand_nesting_resolves_parent(tmp_path):
+    # 6a: `&` resolves against the parent selector; plain nested rules do not.
+    (tmp_path / "a.scss").write_text(
+        ".btn {\n  color: red;\n  &:hover { color: blue; }\n"
+        "  &.active { color: green; }\n  .icon { width: 1em; }\n}\n"
+    )
+    parser = CodeParser(tmp_path)
+    nodes, _ = parser.parse_file(tmp_path / "a.scss")
+    selectors = sorted(n.extra["selector"] for n in nodes if n.extra.get("css_kind"))
+    assert selectors == [".btn", ".btn.active", ".btn:hover", ".icon"]
+
+
+def test_sfc_style_selector_line_numbers(tmp_path):
+    # 6b: selector lines are offset by the <style> block's position in the SFC.
+    (tmp_path / "W.vue").write_text(
+        "<template>\n  <button class=\"btn\">x</button>\n</template>\n"
+        "<style scoped>\n.btn { color: red; }\n\n.other { color: blue; }\n</style>\n"
+    )
+    parser = CodeParser(tmp_path)
+    nodes, _ = parser.parse_file(tmp_path / "W.vue")
+    lines = {
+        n.extra["selector"]: n.line_start for n in nodes if n.extra.get("css_kind")
+    }
+    assert lines == {".btn": 5, ".other": 7}
+
+
 # --- Linking ----------------------------------------------------------------
 
 def test_multi_file_same_class_isolated(tmp_path, monkeypatch):
@@ -239,6 +265,26 @@ def test_incremental_heal_stylesheet_created_after_component(tmp_path, monkeypat
     edges = _styles_edges(store)
     assert len(edges) == 1
     assert edges[0]["target_qualified"].endswith("s.module.css::.card")
+
+
+def test_incremental_deletion_removes_selectors_and_edges(tmp_path, monkeypatch):
+    # 6c: deleting the stylesheet (import kept) through incremental's real
+    # missing-file path removes both selector nodes and STYLES edges.
+    monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+    (tmp_path / "s.module.css").write_text(".card { color: red; }\n")
+    (tmp_path / "Comp.tsx").write_text(
+        "import styles from './s.module.css';\n"
+        "export function Comp() { return <div className={styles.card}>x</div>; }\n"
+    )
+    store = GraphStore(tmp_path / "graph.db")
+    stats = full_build(tmp_path, store)
+    assert stats["css_resolution"]["styles_edges"] == 1
+
+    (tmp_path / "s.module.css").unlink()
+    stats = incremental_update(tmp_path, store, changed_files=["s.module.css"])
+    assert stats["css_resolution"]["styles_edges"] == 0
+    assert _styles_edges(store) == []
+    assert _selector_nodes(store) == []
 
 
 def test_scoped_sfc_no_conflict(tmp_path, monkeypatch):
