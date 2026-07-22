@@ -130,7 +130,7 @@ Data or event flow relationships emitted by specialised parsers when a source co
 Temporal dependency placeholder emitted by specialised parsers when a time/order relationship is detected but cannot be resolved to a stronger edge type.
 
 ### STYLES
-A component references a CSS Modules selector via `className={styles.foo}`. The reference is resolved through the importing file's `@import` to a single stylesheet, so the edge only ever targets selectors in the imported file.
+A component references a CSS Modules selector via `className={styles.foo}`. The reference is resolved through the component file's ES module import (`import styles from './x.module.css'`) to a single stylesheet, so the edge only ever targets selectors in the imported file. Resolution happens at link time, on every CSS-relevant update; an import that does not resolve produces no edge.
 
 | Property | Type | Description |
 |----------|------|-------------|
@@ -141,6 +141,8 @@ A component references a CSS Modules selector via `className={styles.foo}`. The 
 | class_name | string | The matched CSS class (bare) |
 
 CSS selectors are stored as `Class` nodes with `extra.css_kind="selector"`, a `scope` of `module`, `scoped` (Vue `<style scoped>` / Svelte), or `global`, and a per-file occurrence ordinal (`.btn`, `.btn#1`) so repeated selectors stay distinct.
+
+Known recall boundary: only direct `className={styles.x}` member expressions are detected. `clsx(...)`, ternaries, template literals, destructured properties, and bracket access (`styles['a-b']`) produce no edge — absent, never wrong. References whose name is shadowed by an enclosing function parameter or a `const`/`let`/`var` re-declaration are skipped for the same reason. Class matching prefers the exact spelling of the accessed property; the camelCase-to-kebab-case fallback (`styles.btnPrimary` matching `.btn-primary`) applies only when the exact spelling has no selector in the imported file.
 
 ## Qualified Name Format
 

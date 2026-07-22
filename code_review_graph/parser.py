@@ -2828,10 +2828,6 @@ class CodeParser:
     # Stylesheets (.css / .scss and SFC <style> blocks)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _camel_to_kebab(name: str) -> str:
-        return re.sub(r"(?<=[a-z0-9])([A-Z])", r"-\1", name).lower()
-
     def _css_scope_for_path(self, path: Path) -> str:
         """CSS Modules (``*.module.css``) are locally scoped; everything else
         is a plain global stylesheet."""
