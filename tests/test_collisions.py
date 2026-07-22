@@ -227,6 +227,300 @@ class TestEndToEnd:
         store.close()
 
 
+class TestConnectedContainment:
+    """Every CONTAINS source exists and every #N node is CONTAINS-reachable."""
+
+    def _assert_no_dangling_contains(self, store):
+        node_keys = {r["qualified_name"] for r in store._conn.execute(
+            "SELECT qualified_name FROM nodes")}
+        sources = {r["source_qualified"] for r in store._conn.execute(
+            "SELECT source_qualified FROM edges WHERE kind = 'CONTAINS'")}
+        assert sources <= node_keys
+
+    def test_object_literal_binding_gets_container_node(self, tmp_path):
+        store = GraphStore(tmp_path / "g.db")
+        db = tmp_path / "db.ts"
+        _build_file(
+            store, db,
+            "const personas = {\n"
+            "  getById(id) { return id; },\n"
+            "  list() { return []; },\n"
+            "};\n",
+        )
+        binding = store._conn.execute(
+            "SELECT kind, extra FROM nodes WHERE qualified_name = ?",
+            (f"{db}::personas",),
+        ).fetchone()
+        assert binding is not None
+        assert binding["kind"] == "Class"
+        import json
+        assert json.loads(binding["extra"])["object_literal"] is True
+        # Connected chain: File CONTAINS personas CONTAINS personas.getById.
+        contains = {
+            (r["source_qualified"], r["target_qualified"])
+            for r in store._conn.execute(
+                "SELECT source_qualified, target_qualified FROM edges "
+                "WHERE kind = 'CONTAINS'")
+        }
+        assert (str(db), f"{db}::personas") in contains
+        assert (f"{db}::personas", f"{db}::personas.getById") in contains
+        self._assert_no_dangling_contains(store)
+        store.close()
+
+    def test_ordinal_nodes_reachable_via_contains(self, tmp_path):
+        store = GraphStore(tmp_path / "g.db")
+        src = tmp_path / "a.ts"
+        _build_file(
+            store, src,
+            "function setup() { return 1; }\n"
+            "function setup() { return 2; }\n",
+        )
+        targets = [r["target_qualified"] for r in store._conn.execute(
+            "SELECT target_qualified FROM edges WHERE kind = 'CONTAINS'")]
+        assert sorted(targets) == [f"{src}::setup", f"{src}::setup#1"]
+        self._assert_no_dangling_contains(store)
+        store.close()
+
+    def test_duplicate_bodies_own_their_outgoing_calls(self, tmp_path):
+        store = GraphStore(tmp_path / "g.db")
+        src = tmp_path / "a.ts"
+        _build_file(
+            store, src,
+            "function setup() { return alpha(); }\n"
+            "function setup() { return beta(); }\n"
+            "function alpha() { return 1; }\n"
+            "function beta() { return 2; }\n",
+        )
+        sources = {
+            r["target_qualified"].rsplit("::", 1)[-1]:
+                r["source_qualified"].rsplit("::", 1)[-1]
+            for r in _calls(store)
+        }
+        assert sources["alpha"] == "setup"
+        assert sources["beta"] == "setup#1"
+        store.close()
+
+
+class TestPythonSameNameIdioms:
+    """Decorator-linked and conditional defs stay ONE followable symbol."""
+
+    def _node_keys(self, store, name):
+        return [r["qualified_name"].rsplit("::", 1)[-1]
+                for r in store._conn.execute(
+                    "SELECT qualified_name FROM nodes WHERE name = ?", (name,))]
+
+    def test_property_setter_pair_is_one_node(self, tmp_path):
+        store = GraphStore(tmp_path / "g.db")
+        _build_file(
+            store, tmp_path / "p1.py",
+            "class Config:\n"
+            "    @property\n"
+            "    def value(self):\n"
+            "        return self._v\n"
+            "\n"
+            "    @value.setter\n"
+            "    def value(self, v):\n"
+            "        self._v = v\n",
+        )
+        assert self._node_keys(store, "value") == ["Config.value"]
+        store.close()
+
+    def test_conditional_def_callers_stay_followable(self, tmp_path):
+        store = GraphStore(tmp_path / "g.db")
+        src = tmp_path / "p2.py"
+        _build_file(
+            store, src,
+            "import sys\n"
+            "if sys.version_info >= (3, 12):\n"
+            "    def parse(x):\n"
+            "        return 1\n"
+            "else:\n"
+            "    def parse(x):\n"
+            "        return 2\n"
+            "\n"
+            "def main():\n"
+            "    return parse(1)\n",
+        )
+        run_post_processing(store)
+        assert self._node_keys(store, "parse") == ["parse"]
+        row = next(r for r in _calls(store)
+                   if r["source_qualified"].endswith("::main"))
+        assert row["target_qualified"] == f"{src}::parse"
+        assert row["confidence_tier"] == "EXTRACTED"
+        store.close()
+
+    def test_overload_stack_callers_stay_followable(self, tmp_path):
+        store = GraphStore(tmp_path / "g.db")
+        src = tmp_path / "p3.py"
+        _build_file(
+            store, src,
+            "from typing import overload\n"
+            "\n"
+            "@overload\n"
+            "def get(x: int) -> int: ...\n"
+            "@overload\n"
+            "def get(x: str) -> str: ...\n"
+            "def get(x):\n"
+            "    return x\n"
+            "\n"
+            "def main():\n"
+            "    return get(1)\n",
+        )
+        run_post_processing(store)
+        assert self._node_keys(store, "get") == ["get"]
+        row = next(r for r in _calls(store)
+                   if r["source_qualified"].endswith("::main"))
+        assert row["target_qualified"] == f"{src}::get"
+        assert row["confidence_tier"] == "EXTRACTED"
+        store.close()
+
+
+class TestNonTreeSitterPaths:
+    """Every parse path flows through the identity choke point."""
+
+    def test_vue_duplicate_setups_stay_distinct(self, tmp_path):
+        store = GraphStore(tmp_path / "g.db")
+        _build_file(
+            store, tmp_path / "App.vue",
+            "<script>\n"
+            "function setup() { return 1; }\n"
+            "function setup() { return 2; }\n"
+            "</script>\n"
+            "<template><div/></template>\n",
+        )
+        keys = sorted(r["qualified_name"].rsplit("::", 1)[-1]
+                      for r in store._conn.execute(
+                          "SELECT qualified_name FROM nodes "
+                          "WHERE name = 'setup'"))
+        assert keys == ["setup", "setup#1"]
+        store.close()
+
+
+class TestAmbiguityLifecycle:
+    """Cross-file duplicate targets are flagged, and flags clear on resolve."""
+
+    def _stale_setup(self, tmp_path):
+        store = GraphStore(tmp_path / "g.db")
+        lib = tmp_path / "lib.ts"
+        caller = tmp_path / "caller.ts"
+        _build_file(
+            store, lib,
+            "export function setup() { return 1; }\n"
+            "export function setup() { return 2; }\n",
+        )
+        _build_file(
+            store, caller,
+            "import { setup } from './lib';\n"
+            "function main() { return setup(); }\n",
+        )
+        store.resolve_bare_call_targets()
+        return store, lib
+
+    def test_cross_file_duplicate_target_downgraded(self, tmp_path):
+        import json
+
+        store, lib = self._stale_setup(tmp_path)
+        row = next(r for r in _calls(store)
+                   if r["source_qualified"].endswith("::main"))
+        assert row["confidence_tier"] == "AMBIGUOUS"
+        assert sorted(
+            c.rsplit("::", 1)[-1]
+            for c in json.loads(row["extra"])["ambiguous_candidates"]
+        ) == ["setup", "setup#1"]
+        store.close()
+
+    def test_ambiguity_cleared_when_duplicate_removed(self, tmp_path):
+        import json
+
+        store, lib = self._stale_setup(tmp_path)
+        _build_file(store, lib, "export function setup() { return 1; }\n")
+        store.resolve_bare_call_targets()
+        row = next(r for r in _calls(store)
+                   if r["source_qualified"].endswith("::main"))
+        assert row["confidence_tier"] == "EXTRACTED"
+        assert row["target_qualified"] == f"{lib}::setup"
+        assert "ambiguous_candidates" not in json.loads(row["extra"])
+        store.close()
+
+
+class TestReferencesToDuplicates:
+    """REFERENCES to multiply-defined names resolve or are flagged, never dangle."""
+
+    def test_reference_to_duplicated_name_is_flagged(self, tmp_path):
+        store = GraphStore(tmp_path / "g.db")
+        _build_file(
+            store, tmp_path / "r.ts",
+            "function handler() { return 1; }\n"
+            "function handler() { return 2; }\n"
+            "const DISPATCH = { h: handler };\n",
+        )
+        store.resolve_bare_call_targets()
+        rows = store._conn.execute(
+            "SELECT target_qualified, confidence_tier FROM edges "
+            "WHERE kind = 'REFERENCES'"
+        ).fetchall()
+        assert rows
+        for row in rows:
+            resolved = "::" in row["target_qualified"]
+            assert resolved or row["confidence_tier"] == "AMBIGUOUS"
+        store.close()
+
+
+class TestOrdinalSemantics:
+    """Ordinals are line-independent but document-order ranked."""
+
+    def _keys(self, tmp_path, text):
+        parser = CodeParser()
+        path = tmp_path / "a.ts"
+        path.write_text(text)
+        nodes, _ = parser.parse_file(path)
+        return sorted(
+            f"{n.name}#{n.disambiguator}" if n.disambiguator else n.name
+            for n in nodes if n.kind != "File"
+        )
+
+    def test_reorder_keeps_key_set_stable(self, tmp_path):
+        first = self._keys(
+            tmp_path,
+            "function setup() { return 1; }\nfunction setup() { return 2; }\n",
+        )
+        reordered = self._keys(
+            tmp_path,
+            "function setup() { return 2; }\nfunction setup() { return 1; }\n",
+        )
+        # Bodies may land under the other's ordinal, but the keys are stable.
+        assert first == reordered == ["setup", "setup#1"]
+
+    def test_deleting_first_renumbers_the_rest(self, tmp_path):
+        assert self._keys(
+            tmp_path, "function setup() { return 2; }\n",
+        ) == ["setup"]
+
+
+class TestSchemaMigrationForcesReingest:
+    """v10 clears stored file hashes so pre-fix graphs re-ingest everything."""
+
+    def test_old_schema_version_clears_file_hashes(self, tmp_path):
+        db_path = tmp_path / "g.db"
+        store = GraphStore(db_path)
+        src = tmp_path / "a.ts"
+        parser = CodeParser()
+        src.write_text("function setup() { return 1; }\n")
+        nodes, edges = parser.parse_file(src)
+        store.store_file_nodes_edges(str(src), nodes, edges, fhash="deadbeef")
+        # Simulate a database built before the identity change.
+        store._conn.execute(
+            "UPDATE metadata SET value = '9' WHERE key = 'schema_version'")
+        store._conn.commit()
+        store.close()
+
+        store = GraphStore(db_path)
+        hashes = {r["file_hash"] for r in store._conn.execute(
+            "SELECT file_hash FROM nodes")}
+        assert hashes == {""}
+        store.close()
+
+
 class TestExistingDatabaseMigration:
     """Requirement 4: a rebuild migrates old collapsed keys and embeddings."""
 
