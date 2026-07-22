@@ -2490,32 +2490,63 @@ class CodeParser:
     @staticmethod
     def _css_ref_shadowed(node, name: str) -> bool:
         """True when ``name`` is re-bound between ``node`` and module scope:
-        a parameter of an enclosing function, or a const/let/var declarator in
-        an enclosing block. Such a reference is not the CSS Module import."""
-        def binds(subtree) -> bool:
-            if subtree.type in ("identifier", "shorthand_property_identifier_pattern"):
-                return subtree.text.decode("utf-8", errors="replace") == name
-            return any(binds(c) for c in subtree.children)
+        a function/catch parameter, a loop binding, or a const/let/var
+        declarator in an enclosing block. Such a reference is not the CSS
+        Module import. Only binding positions count — an identifier inside a
+        parameter default value or a TS type annotation never shadows."""
+        def binds(pat) -> bool:
+            if pat is None:
+                return False
+            t = pat.type
+            if t in ("identifier", "shorthand_property_identifier_pattern"):
+                return pat.text.decode("utf-8", errors="replace") == name
+            if t in ("required_parameter", "optional_parameter"):
+                return binds(pat.child_by_field_name("pattern"))
+            if t in ("assignment_pattern", "object_assignment_pattern"):
+                return binds(pat.child_by_field_name("left"))
+            if t == "pair_pattern":
+                return binds(pat.child_by_field_name("value"))
+            if t in (
+                "formal_parameters", "object_pattern", "array_pattern",
+                "rest_pattern",
+            ):
+                return any(binds(c) for c in pat.named_children)
+            return False
+
+        def declares(stmt) -> bool:
+            if stmt.type not in ("lexical_declaration", "variable_declaration"):
+                return False
+            return any(
+                binds(d.child_by_field_name("name"))
+                for d in stmt.named_children if d.type == "variable_declarator"
+            )
 
         current = node.parent
         while current is not None:
-            if current.type in (
+            t = current.type
+            if t in (
                 "arrow_function", "function_declaration", "function_expression",
                 "generator_function", "generator_function_declaration",
                 "method_definition", "function",
             ):
-                params = current.child_by_field_name("parameters")
-                if params is not None and binds(params):
+                # Arrow functions expose a bare param via the singular field.
+                if binds(current.child_by_field_name("parameters")) or binds(
+                    current.child_by_field_name("parameter"),
+                ):
                     return True
-            elif current.type == "statement_block":
-                for stmt in current.children:
-                    if stmt.type not in ("lexical_declaration", "variable_declaration"):
-                        continue
-                    for decl in stmt.children:
-                        if decl.type == "variable_declarator":
-                            target = decl.child_by_field_name("name")
-                            if target is not None and binds(target):
-                                return True
+            elif t == "statement_block":
+                if any(declares(s) for s in current.named_children):
+                    return True
+            elif t == "for_statement":
+                init = current.child_by_field_name("initializer")
+                if init is not None and declares(init):
+                    return True
+            elif t == "for_in_statement":
+                if binds(current.child_by_field_name("left")):
+                    return True
+            elif t == "catch_clause":
+                if binds(current.child_by_field_name("parameter")):
+                    return True
             current = current.parent
         return False
 

@@ -247,6 +247,69 @@ def test_local_const_shadowed_styles_no_edge(tmp_path, monkeypatch):
     assert stats["css_resolution"]["styles_edges"] == 0
 
 
+def test_bare_arrow_param_shadow_no_edge(tmp_path, monkeypatch):
+    # R6: unparenthesized arrow param uses the singular `parameter` field.
+    (tmp_path / "s.module.css").write_text(".foo { color: red; }\n")
+    (tmp_path / "C.tsx").write_text(
+        "import styles from './s.module.css';\n"
+        "export const C = () => ['a'].map(styles => <div className={styles.foo}>x</div>);\n"
+    )
+    store, stats = _build(tmp_path, monkeypatch)
+    assert stats["css_resolution"]["styles_edges"] == 0
+
+
+def test_for_of_binding_shadow_no_edge(tmp_path, monkeypatch):
+    # R7: `for (const styles of themes)` binds inside the loop body.
+    (tmp_path / "s.module.css").write_text(".foo { color: red; }\n")
+    (tmp_path / "C.tsx").write_text(
+        "import styles from './s.module.css';\n"
+        "export function C({themes}: any) {\n"
+        "  for (const styles of themes) { return <div className={styles.foo}>x</div>; }\n"
+        "  return null;\n}\n"
+    )
+    store, stats = _build(tmp_path, monkeypatch)
+    assert stats["css_resolution"]["styles_edges"] == 0
+
+
+def test_catch_param_shadow_no_edge(tmp_path, monkeypatch):
+    # R10: `catch (styles)` binds inside the catch block.
+    (tmp_path / "s.module.css").write_text(".foo { color: red; }\n")
+    (tmp_path / "C.tsx").write_text(
+        "import styles from './s.module.css';\n"
+        "export function C() { try { return null; } catch (styles) "
+        "{ return <div className={styles.foo}>x</div>; } }\n"
+    )
+    store, stats = _build(tmp_path, monkeypatch)
+    assert stats["css_resolution"]["styles_edges"] == 0
+
+
+def test_param_default_value_does_not_shadow(tmp_path, monkeypatch):
+    # R8: `styles` inside a destructured param's DEFAULT VALUE is a use of the
+    # import, not a binding — refs in the function must still link.
+    (tmp_path / "s.module.css").write_text(".root { color: red; }\n.inner { color: blue; }\n")
+    (tmp_path / "C.tsx").write_text(
+        "import styles from './s.module.css';\n"
+        "export function C({ className = styles.root }: any) {\n"
+        "  return <div className={styles.inner}>x</div>;\n}\n"
+    )
+    store, stats = _build(tmp_path, monkeypatch)
+    assert stats["css_resolution"]["styles_edges"] == 1
+    assert _styles_edges(store)[0][1].endswith("::.inner")
+
+
+def test_type_annotation_mention_does_not_shadow(tmp_path, monkeypatch):
+    # R15: `keyof typeof styles` in a TS type annotation is not a binding.
+    (tmp_path / "s.module.css").write_text(".inner { color: blue; }\n")
+    (tmp_path / "C.tsx").write_text(
+        "import styles from './s.module.css';\n"
+        "export function C(props: { k: keyof typeof styles }) "
+        "{ return <div className={styles.inner}>x</div>; }\n"
+    )
+    store, stats = _build(tmp_path, monkeypatch)
+    assert stats["css_resolution"]["styles_edges"] == 1
+    assert _styles_edges(store)[0][1].endswith("::.inner")
+
+
 def test_incremental_heal_stylesheet_created_after_component(tmp_path, monkeypatch):
     # S1: component indexed while its stylesheet is missing; the stylesheet
     # appearing later must link on an incremental update of the CSS alone.
