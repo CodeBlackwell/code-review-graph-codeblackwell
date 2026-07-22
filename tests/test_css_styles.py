@@ -259,6 +259,16 @@ def test_scoped_sfc_no_conflict(tmp_path, monkeypatch):
     assert conflicts == 0
 
 
+def test_sfc_indented_sass_not_parsed_as_scss(tmp_path, monkeypatch):
+    # lang="sass" is indented Sass, not SCSS: skip it rather than mis-parse.
+    (tmp_path / "W.vue").write_text(
+        "<template><button class=\"btn\">x</button></template>\n"
+        "<style lang=\"sass\">\n.btn\n  color: red\n</style>\n"
+    )
+    store, _ = _build(tmp_path, monkeypatch)
+    assert _selector_nodes(store) == []
+
+
 def test_styles_of_and_styled_by_queries(tmp_path, monkeypatch):
     monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
     (tmp_path / "s.module.css").write_text(".card { color: red; }\n")

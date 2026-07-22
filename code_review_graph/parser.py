@@ -2911,9 +2911,13 @@ class CodeParser:
                                     value = v.text.decode("utf-8", errors="replace")
                     if name == "scoped":
                         scoped = True
-                    elif name == "lang" and value in ("scss", "sass"):
-                        lang = "scss"
+                    elif name == "lang" and value:
+                        # Only css/scss have grammars here; indented Sass,
+                        # Less, etc. are skipped rather than mis-parsed.
+                        lang = value if value in ("css", "scss") else None
 
+            if lang is None:
+                continue
             style_parser = self._get_parser(lang)
             if not style_parser:
                 continue
