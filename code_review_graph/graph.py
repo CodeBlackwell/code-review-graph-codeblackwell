@@ -34,6 +34,18 @@ from .parser import EdgeInfo, NodeInfo
 
 logger = logging.getLogger(__name__)
 
+
+def _edge_receiver(edge: sqlite3.Row) -> Optional[str]:
+    """Return the member-call receiver recorded on an edge, if any."""
+    raw = edge["extra"]
+    if not raw:
+        return None
+    try:
+        return json.loads(raw).get("receiver")
+    except (ValueError, AttributeError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -583,6 +595,28 @@ class GraphStore:
         ]
         return supported[0] if len(supported) == 1 else None
 
+    @staticmethod
+    def _pick_bare_candidate(
+        backed: list[tuple[str, Optional[str]]], receiver: Optional[str],
+    ) -> str | None:
+        """Resolve an evidence-backed candidate: sole one, else receiver match."""
+        if len(backed) == 1:
+            return backed[0][0]
+        if receiver:
+            matches = [qualified for qualified, parent in backed if parent == receiver]
+            if len(matches) == 1:
+                return matches[0]
+        return None
+
+    def _mark_edge_ambiguous(self, edge: sqlite3.Row, candidates: list[str]) -> None:
+        """Flag an unresolved edge whose bare endpoint has several definitions."""
+        extra = json.loads(edge["extra"]) if edge["extra"] else {}
+        extra["ambiguous_candidates"] = candidates
+        self._conn.execute(
+            "UPDATE edges SET confidence_tier = 'AMBIGUOUS', extra = ? WHERE id = ?",
+            (json.dumps(extra), edge["id"]),
+        )
+
     def resolve_bare_call_targets(self) -> int:
         """Resolve bare CALLS targets backed by same-file or import evidence.
 
@@ -612,14 +646,14 @@ class GraphStore:
         """Resolve a bare edge endpoint only when one candidate has evidence."""
         if endpoint == "target_qualified":
             select_sql = (
-                "SELECT id, source_qualified, target_qualified, file_path "
+                "SELECT id, source_qualified, target_qualified, file_path, extra "
                 "FROM edges WHERE kind = ? "
                 "AND target_qualified NOT LIKE '%::%'"
             )
             update_sql = "UPDATE edges SET target_qualified = ? WHERE id = ?"
         elif endpoint == "source_qualified":
             select_sql = (
-                "SELECT id, source_qualified, target_qualified, file_path "
+                "SELECT id, source_qualified, target_qualified, file_path, extra "
                 "FROM edges WHERE kind = ? "
                 "AND source_qualified NOT LIKE '%::%'"
             )
@@ -633,14 +667,14 @@ class GraphStore:
         if not bare_edges:
             return 0
 
-        # bare_name -> [(qualified_name, defining_file)]
-        node_lookup: dict[str, list[tuple[str, str]]] = {}
+        # bare_name -> [(qualified_name, defining_file, parent_name)]
+        node_lookup: dict[str, list[tuple[str, str, Optional[str]]]] = {}
         for row in conn.execute(
-            "SELECT name, qualified_name, file_path FROM nodes "
+            "SELECT name, qualified_name, file_path, parent_name FROM nodes "
             "WHERE kind IN ('Function', 'Test', 'Class')"
         ).fetchall():
             node_lookup.setdefault(row["name"], []).append(
-                (row["qualified_name"], row["file_path"]),
+                (row["qualified_name"], row["file_path"], row["parent_name"]),
             )
 
         # call-site file -> explicitly imported files
@@ -654,6 +688,7 @@ class GraphStore:
             import_targets.setdefault(row["file_path"], set()).add(target_file)
 
         resolved = 0
+        ambiguous = 0
         for edge in bare_edges:
             bare_name = edge[endpoint]
             candidates = node_lookup.get(bare_name, [])
@@ -662,25 +697,33 @@ class GraphStore:
 
             context_file = edge["file_path"]
             imported_files = import_targets.get(context_file, set())
-            qualified = self._select_evidence_backed_candidate(
-                candidates,
-                context_file,
-                imported_files,
-            )
-            if qualified is None:
+            backed = [
+                (qualified, parent)
+                for qualified, candidate_file, parent in candidates
+                if candidate_file == context_file or candidate_file in imported_files
+            ]
+            if not backed:
                 continue
 
-            conn.execute(update_sql, (qualified, edge["id"]))
-            resolved += 1
+            qualified = self._pick_bare_candidate(backed, _edge_receiver(edge))
+            if qualified is not None:
+                conn.execute(update_sql, (qualified, edge["id"]))
+                resolved += 1
+            elif len(backed) > 1:
+                # Evidence names several definitions and nothing singles one
+                # out: record the ambiguity instead of guessing the first.
+                self._mark_edge_ambiguous(edge, [q for q, _ in backed])
+                ambiguous += 1
 
-        if resolved:
+        if resolved or ambiguous:
             conn.commit()
             endpoint_label = (
                 "sources" if endpoint == "source_qualified" else "targets"
             )
             logger.info(
-                "Resolved %d evidence-backed bare %s %s",
+                "Resolved %d and flagged %d ambiguous bare %s %s",
                 resolved,
+                ambiguous,
                 kind,
                 endpoint_label,
             )

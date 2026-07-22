@@ -4027,14 +4027,26 @@ class CodeParser:
                 nodes, edges, file_path,
             )
 
-        # Build symbol table: bare_name -> qualified_name
+        # Build symbol table: bare_name -> qualified_name. Names defined more
+        # than once are left out so the call stays bare and the store's
+        # evidence resolver decides between the duplicates or flags ambiguity.
         symbols: dict[str, str] = {}
+        counts: dict[str, int] = {}
         for node in nodes:
             if node.kind in ("Function", "Class", "Type", "Test"):
-                bare = node.name
-                qualified = self._qualify(bare, file_path, node.parent_name)
-                if bare not in symbols:
-                    symbols[bare] = qualified
+                qualified = self._qualify(node.name, file_path, node.parent_name)
+                counts[qualified] = counts.get(qualified, 0) + 1
+                symbols.setdefault(node.name, qualified)
+
+        # A qualified name defined 2+ times in the file is an identical-scope
+        # duplicate. Calls to it stay bare (or are reverted to bare if an
+        # earlier pass already picked the first definition) so the store's
+        # evidence resolver decides between them or flags the ambiguity.
+        duplicated = {
+            qualified: qualified.rsplit(".", 1)[-1].rsplit("::", 1)[-1]
+            for qualified, count in counts.items()
+            if count > 1
+        }
 
         resolved: list[EdgeInfo] = []
         for edge in edges:
@@ -4045,22 +4057,27 @@ class CodeParser:
                 resolved.append(edge)
                 continue
             has_receiver = bool(edge.extra.get("receiver"))
-            if (
-                edge.kind in ("CALLS", "REFERENCES")
-                and "::" not in edge.target
-                and not has_receiver
-            ):
-                if edge.target in symbols:
-                    edge = EdgeInfo(
-                        kind=edge.kind,
-                        source=edge.source,
-                        target=symbols[edge.target],
-                        file_path=edge.file_path,
-                        line=edge.line,
-                        extra=edge.extra,
-                    )
+            if edge.kind in ("CALLS", "REFERENCES") and not has_receiver:
+                if "::" not in edge.target:
+                    target = symbols.get(edge.target)
+                    if target is not None and target not in duplicated:
+                        edge = self._retarget(edge, target)
+                elif edge.target in duplicated:
+                    edge = self._retarget(edge, duplicated[edge.target])
             resolved.append(edge)
         return resolved
+
+    @staticmethod
+    def _retarget(edge: EdgeInfo, target: str) -> EdgeInfo:
+        """Return a copy of ``edge`` pointing at a new target."""
+        return EdgeInfo(
+            kind=edge.kind,
+            source=edge.source,
+            target=target,
+            file_path=edge.file_path,
+            line=edge.line,
+            extra=edge.extra,
+        )
 
     def _resolve_julia_call_targets(
         self,
