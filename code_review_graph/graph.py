@@ -1557,8 +1557,11 @@ class GraphStore:
         if node.kind == "File":
             return node.file_path
         if node.parent_name:
-            return f"{node.file_path}::{node.parent_name}.{node.name}"
-        return f"{node.file_path}::{node.name}"
+            base = f"{node.file_path}::{node.parent_name}.{node.name}"
+        else:
+            base = f"{node.file_path}::{node.name}"
+        suffix = getattr(node, "disambiguator", None)
+        return f"{base}#{suffix}" if suffix else base
 
     def _row_to_node(self, row: sqlite3.Row) -> GraphNode:
         return GraphNode(

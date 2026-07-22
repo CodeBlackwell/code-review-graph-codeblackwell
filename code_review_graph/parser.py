@@ -521,6 +521,26 @@ class NodeInfo:
     modifiers: Optional[str] = None
     is_test: bool = False
     extra: dict = field(default_factory=dict)
+    disambiguator: Optional[str] = None  # distinguishes identical-scope duplicates
+
+
+def _assign_disambiguators(nodes: list["NodeInfo"]) -> None:
+    """Stamp an occurrence ordinal on 2nd+ nodes sharing a scope, name and kind.
+
+    Two symbols with the same ``(file, parent, name, kind)`` are inherently
+    ambiguous. The ordinal gives each a distinct, position-independent identity
+    so neither is silently dropped on insert; it is recomputed on every parse,
+    so it survives line moves.
+    """
+    counts: dict[tuple[str, Optional[str], str, str], int] = {}
+    for node in nodes:
+        if node.kind == "File":
+            continue
+        key = (node.file_path, node.parent_name, node.name, node.kind)
+        seen = counts.get(key, 0)
+        if seen:
+            node.disambiguator = str(seen)
+        counts[key] = seen + 1
 
 
 @dataclass
@@ -2375,6 +2395,8 @@ class CodeParser:
             )
 
         edges = self._apply_typed_call_targets(edges, typed_call_targets)
+
+        _assign_disambiguators(nodes)
 
         # Resolve bare call targets to qualified names using same-file definitions
         edges = self._resolve_call_targets(nodes, edges, file_path_str)
