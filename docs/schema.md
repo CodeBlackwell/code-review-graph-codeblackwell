@@ -129,6 +129,19 @@ Data or event flow relationships emitted by specialised parsers when a source co
 ### TEMPORAL_STUB
 Temporal dependency placeholder emitted by specialised parsers when a time/order relationship is detected but cannot be resolved to a stronger edge type.
 
+### STYLES
+A component references a CSS Modules selector via `className={styles.foo}`. The reference is resolved through the importing file's `@import` to a single stylesheet, so the edge only ever targets selectors in the imported file.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| source | string | Component qualified name |
+| target | string | CSS selector qualified name |
+| resolution | string | Always `css_module` |
+| property | string | The `styles.<property>` accessed |
+| class_name | string | The matched CSS class (bare) |
+
+CSS selectors are stored as `Class` nodes with `extra.css_kind="selector"`, a `scope` of `module`, `scoped` (Vue `<style scoped>` / Svelte), or `global`, and a per-file occurrence ordinal (`.btn`, `.btn#1`) so repeated selectors stay distinct.
+
 ## Qualified Name Format
 
 Nodes are uniquely identified by qualified names:
