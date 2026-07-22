@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -33,6 +34,21 @@ from .migrations import get_schema_version, run_migrations
 from .parser import EdgeInfo, NodeInfo
 
 logger = logging.getLogger(__name__)
+
+
+# Occurrence-ordinal suffix appended to duplicate qualified names ("#1", "#2").
+_ORDINAL_SUFFIX_RE = re.compile(r"#\d+$")
+
+
+def _duplicate_base(qualified: str) -> str:
+    """Ordinal-stripped, path-normalized key grouping duplicate definitions.
+
+    Import resolution normalizes file paths while node paths are stored as
+    given, so the grouping key must normalize too or the same symbol splits
+    into two groups.
+    """
+    file_part, sep, symbol = _ORDINAL_SUFFIX_RE.sub("", qualified).partition("::")
+    return os.path.normpath(file_part) + sep + symbol
 
 
 def _edge_receiver(edge: sqlite3.Row) -> Optional[str]:
@@ -617,8 +633,22 @@ class GraphStore:
             (json.dumps(extra), edge["id"]),
         )
 
+    def _clear_edge_ambiguity(self, edge: sqlite3.Row) -> None:
+        """Restore a resolved edge's tier and drop stale ambiguity candidates."""
+        extra = json.loads(edge["extra"]) if edge["extra"] else {}
+        if "ambiguous_candidates" not in extra and edge["confidence_tier"] != "AMBIGUOUS":
+            return
+        extra.pop("ambiguous_candidates", None)
+        # upsert_edge derives the column from extra, so the parse-time tier
+        # (default EXTRACTED) is still recorded there.
+        tier = str(extra.get("confidence_tier", "EXTRACTED"))
+        self._conn.execute(
+            "UPDATE edges SET confidence_tier = ?, extra = ? WHERE id = ?",
+            (tier, json.dumps(extra), edge["id"]),
+        )
+
     def resolve_bare_call_targets(self) -> int:
-        """Resolve bare CALLS targets backed by same-file or import evidence.
+        """Resolve bare CALLS/REFERENCES targets backed by evidence.
 
         After parsing, some CALLS edges have bare targets (no ``::`` separator)
         because the parser couldn't resolve cross-file. A globally unique name
@@ -626,9 +656,77 @@ class GraphStore:
         matching helper by coincidence. The candidate must be in the call-site
         file or in exactly one file imported by that file.
 
+        REFERENCES targets go through the same machinery: references reverted
+        to bare because the name is multiply defined must resolve or be
+        flagged, never dangle silently.
+
+        Afterwards, confident edges aimed at one of several same-key
+        definitions are reconciled: downgraded to AMBIGUOUS when nothing
+        singles a duplicate out, and restored once the duplicates collapse
+        back to one definition.
+
         Returns the number of resolved edges.
         """
-        return self._resolve_bare_endpoints("CALLS", "target_qualified")
+        resolved = self._resolve_bare_endpoints("CALLS", "target_qualified")
+        resolved += self._resolve_bare_endpoints("REFERENCES", "target_qualified")
+        self._reconcile_duplicate_targets("CALLS")
+        self._reconcile_duplicate_targets("REFERENCES")
+        return resolved
+
+    def _reconcile_duplicate_targets(self, kind: str) -> None:
+        """Re-check qualified targets against ordinal-stamped duplicate sets.
+
+        Parse-time resolution can confidently pick the first definition of a
+        symbol that has ``#N`` siblings (e.g. a cross-file import of a
+        multiply-defined name). Downgrade such edges to AMBIGUOUS unless
+        receiver evidence singles one duplicate out; conversely, clear a stale
+        AMBIGUOUS flag once only one definition remains.
+        """
+        conn = self._conn
+        groups: dict[str, list[tuple[str, Optional[str]]]] = {}
+        for row in conn.execute(
+            "SELECT qualified_name, parent_name FROM nodes "
+            "WHERE kind IN ('Function', 'Test', 'Class')"
+        ).fetchall():
+            groups.setdefault(_duplicate_base(row["qualified_name"]), []).append(
+                (row["qualified_name"], row["parent_name"]),
+            )
+
+        changed = False
+        for edge in conn.execute(
+            "SELECT id, target_qualified, confidence_tier, extra FROM edges "
+            "WHERE kind = ? AND target_qualified LIKE '%::%'",
+            (kind,),
+        ).fetchall():
+            group = groups.get(_duplicate_base(edge["target_qualified"]))
+            if not group:
+                continue
+            if len(group) == 1:
+                if edge["confidence_tier"] == "AMBIGUOUS":
+                    if edge["target_qualified"] != group[0][0]:
+                        conn.execute(
+                            "UPDATE edges SET target_qualified = ? WHERE id = ?",
+                            (group[0][0], edge["id"]),
+                        )
+                    self._clear_edge_ambiguity(edge)
+                    changed = True
+                continue
+            receiver = _edge_receiver(edge)
+            if receiver:
+                matches = [qn for qn, parent in group if parent == receiver]
+                if len(matches) == 1:
+                    if edge["target_qualified"] != matches[0]:
+                        conn.execute(
+                            "UPDATE edges SET target_qualified = ? WHERE id = ?",
+                            (matches[0], edge["id"]),
+                        )
+                    self._clear_edge_ambiguity(edge)
+                    changed = True
+                    continue
+            self._mark_edge_ambiguous(edge, [qn for qn, _ in group])
+            changed = True
+        if changed:
+            conn.commit()
 
     def resolve_bare_tested_by_sources(self) -> int:
         """Resolve bare TESTED_BY sources backed by graph evidence.
@@ -646,14 +744,16 @@ class GraphStore:
         """Resolve a bare edge endpoint only when one candidate has evidence."""
         if endpoint == "target_qualified":
             select_sql = (
-                "SELECT id, source_qualified, target_qualified, file_path, extra "
+                "SELECT id, source_qualified, target_qualified, file_path, "
+                "confidence_tier, extra "
                 "FROM edges WHERE kind = ? "
                 "AND target_qualified NOT LIKE '%::%'"
             )
             update_sql = "UPDATE edges SET target_qualified = ? WHERE id = ?"
         elif endpoint == "source_qualified":
             select_sql = (
-                "SELECT id, source_qualified, target_qualified, file_path, extra "
+                "SELECT id, source_qualified, target_qualified, file_path, "
+                "confidence_tier, extra "
                 "FROM edges WHERE kind = ? "
                 "AND source_qualified NOT LIKE '%::%'"
             )
@@ -708,6 +808,9 @@ class GraphStore:
             qualified = self._pick_bare_candidate(backed, _edge_receiver(edge))
             if qualified is not None:
                 conn.execute(update_sql, (qualified, edge["id"]))
+                # A previously flagged edge that now resolves is no longer
+                # ambiguous: restore its tier and drop the stale candidates.
+                self._clear_edge_ambiguity(edge)
                 resolved += 1
             elif len(backed) > 1:
                 # Evidence names several definitions and nothing singles one
