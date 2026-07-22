@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-07-21
+
+**Major release.** Rebases the fork onto current upstream main (221 commits
+of upstream changes since the last fork release) and ships two breaking
+redesigns: qualified-name symbol identity for same-file duplicates, and a
+rebuilt CSS engine. Existing graphs re-ingest automatically via migration v10.
+
+### Breaking
+
+- **Qualified-name identity for same-file duplicate symbols.** JS/TS
+  object-literal methods now derive identity from their enclosing scope
+  (`file::binding.method`), and identical duplicate symbols across all parse
+  paths (including Vue, Svelte, and notebooks) get stable occurrence ordinals
+  (`#N`) instead of colliding on one node. Call resolution now uses
+  receiver-evidence to disambiguate between duplicates, an explicit
+  `AMBIGUOUS` confidence tier reports `ambiguous_candidates` on edges it
+  cannot resolve, and `REFERENCES` edges are flagged the same way. Python
+  property, overload, and conditional-def idioms now collapse to a single
+  node, matching upstream behavior. Migration v10 clears stored file hashes,
+  so the next build or incremental update automatically re-parses every
+  indexed file and rebuilds affected symbol identities.
+- **CSS support replaced.** The former CSS v2 engine (bare-class cross-file
+  joins, `OVERRIDES`/`POTENTIAL_CONFLICT` detection, LESS support) is removed.
+  It is replaced by import-resolved CSS Modules `STYLES` edges: link-time
+  resolution against actual import statements, heal-on-appearance for
+  not-yet-parsed targets, scope-tagged selectors (`module`/`scoped`/`global`),
+  shadowing-aware JSX class-reference collection, new `styles_of`/`styled_by`
+  queries, and VS Code extension wiring. The old engine emitted edges it
+  could not prove and produced false high-confidence conflicts; the new one
+  only emits edges backed by a resolved import. Override and conflict
+  detection will return in a future release, built on the new selector
+  identity.
+
+### Added
+
+- 64 new tests (2012 total).
+
+### Removed
+
+- CSS v2 engine: bare-class cross-file joins, `OVERRIDES`/`POTENTIAL_CONFLICT`
+  detection, and LESS support (superseded by the CSS Modules `STYLES` engine
+  above).
+
 ## [2.3.7] - 2026-07-18
 
 **Maintainer-reconciliation release.** This release packages the verified work
