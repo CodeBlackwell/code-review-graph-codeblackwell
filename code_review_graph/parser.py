@@ -7603,14 +7603,32 @@ class CodeParser:
             if declarator.type != "variable_declarator":
                 continue
 
-            # Find identifier and function value
+            # Find identifier and function/object value
             var_name = None
             func_node = None
+            object_node = None
             for sub in declarator.children:
                 if sub.type == "identifier" and var_name is None:
                     var_name = sub.text.decode("utf-8", errors="replace")
                 elif sub.type in self._JS_FUNC_VALUE_TYPES:
                     func_node = sub
+                elif sub.type == "object":
+                    object_node = sub
+
+            # An object literal's methods belong to the binding's scope, so they
+            # qualify as ``binding.method`` — distinct per receiver and stable
+            # across line moves, rather than colliding on the bare method name.
+            if var_name and object_node and not func_node:
+                self._extract_from_tree(
+                    object_node, source, language, file_path, nodes, edges,
+                    enclosing_class=var_name,
+                    enclosing_func=enclosing_func,
+                    import_map=import_map,
+                    defined_names=defined_names,
+                    _depth=_depth + 1,
+                )
+                handled = True
+                continue
 
             if not var_name or not func_node:
                 continue
