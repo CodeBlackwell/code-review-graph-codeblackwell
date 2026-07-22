@@ -238,6 +238,18 @@ def _migrate_v9(conn: sqlite3.Connection) -> None:
     logger.info("Migration v9: added edge confidence columns")
 
 
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """v10: Symbol identity changed (occurrence ordinals, object-literal scopes).
+
+    Graphs built before this version hold collapsed/mixed identities. Clearing
+    the stored file hashes makes the next build re-parse every file, replacing
+    the stale identities without discarding the database.
+    """
+    if _has_column(conn, "nodes", "file_hash"):
+        conn.execute("UPDATE nodes SET file_hash = ''")
+        logger.info("Migration v10: cleared file hashes to force re-ingestion")
+
+
 # ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
@@ -251,6 +263,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     7: _migrate_v7,
     8: _migrate_v8,
     9: _migrate_v9,
+    10: _migrate_v10,
 }
 
 LATEST_VERSION = max(MIGRATIONS.keys())
