@@ -128,6 +128,7 @@ def test_unresolved_module_import_no_edge(tmp_path, monkeypatch):
 
 
 def test_camel_to_kebab_and_raw_match(tmp_path, monkeypatch):
+    # Kebab fallback fires only when the exact spelling has no selector.
     (tmp_path / "s.module.css").write_text(".btn-primary { color: red; }\n")
     (tmp_path / "C.tsx").write_text(
         "import styles from './s.module.css';\n"
@@ -136,6 +137,21 @@ def test_camel_to_kebab_and_raw_match(tmp_path, monkeypatch):
     store, stats = _build(tmp_path, monkeypatch)
     assert stats["css_resolution"]["styles_edges"] == 1
     assert _styles_edges(store)[0][1].endswith("::.btn-primary")
+
+
+def test_exact_match_wins_over_kebab_fallback(tmp_path, monkeypatch):
+    # S6: a module defining BOTH .btnPrimary and .btn-primary yields exactly
+    # one edge, to the exact spelling.
+    (tmp_path / "s.module.css").write_text(
+        ".btnPrimary { color: red; }\n.btn-primary { color: blue; }\n"
+    )
+    (tmp_path / "C.tsx").write_text(
+        "import styles from './s.module.css';\n"
+        "export function C() { return <button className={styles.btnPrimary}>x</button>; }\n"
+    )
+    store, stats = _build(tmp_path, monkeypatch)
+    assert stats["css_resolution"]["styles_edges"] == 1
+    assert _styles_edges(store)[0][1].endswith("::.btnPrimary")
 
 
 def test_scale_bounded_join(tmp_path, monkeypatch):

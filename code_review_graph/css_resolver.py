@@ -126,25 +126,29 @@ def resolve_css_styles(store: GraphStore, repo_root: Path) -> dict:
             if not resolved_file or not prop:
                 continue
             resolved_file = norm(resolved_file)
-            seen: set[str] = set()
-            for bare in (prop, _camel_to_kebab(prop)):
-                for target in index.get((resolved_file, bare), ()):
-                    if target in seen:
-                        continue
-                    seen.add(target)
-                    store.upsert_edge(EdgeInfo(
-                        kind="STYLES",
-                        source=row["qualified_name"],
-                        target=target,
-                        file_path=row["file_path"],
-                        line=row["line_start"] or 0,
-                        extra={
-                            "resolution": "css_module",
-                            "property": prop,
-                            "class_name": bare,
-                        },
-                    ))
-                    count += 1
+            # Exact spelling wins; the kebab-case fallback (camelCase access of
+            # a kebab-cased class) applies only when the exact spelling has no
+            # selector in the imported file, so a module defining both never
+            # yields two edges for one reference.
+            bare = prop
+            targets = index.get((resolved_file, bare), ())
+            if not targets:
+                bare = _camel_to_kebab(prop)
+                targets = index.get((resolved_file, bare), ())
+            for target in targets:
+                store.upsert_edge(EdgeInfo(
+                    kind="STYLES",
+                    source=row["qualified_name"],
+                    target=target,
+                    file_path=row["file_path"],
+                    line=row["line_start"] or 0,
+                    extra={
+                        "resolution": "css_module",
+                        "property": prop,
+                        "class_name": bare,
+                    },
+                ))
+                count += 1
 
     conn.commit()
     logger.info("CSS resolver: %d STYLES edges", count)
