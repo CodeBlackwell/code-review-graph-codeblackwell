@@ -522,6 +522,10 @@ class NodeInfo:
     is_test: bool = False
     extra: dict = field(default_factory=dict)
     disambiguator: Optional[str] = None  # distinguishes identical-scope duplicates
+    # Identity of the enclosing def/class tree node (Python only, not
+    # persisted): lets idiom collapsing tell same-name defs in different
+    # scopes apart when parent_name alone cannot (closures, class ordinals).
+    scope_token: Optional[int] = None
 
 
 def _assign_disambiguators(nodes: list["NodeInfo"]) -> None:
@@ -551,6 +555,9 @@ def _assign_disambiguators(nodes: list["NodeInfo"]) -> None:
         counts[key] = seen + 1
 
 
+# Matching is by bare decorator name, so a user decorator literally named
+# ``overload`` (or ``property``) also links its defs — accepted risk: parse
+# time has no import resolution, and shadowing these builtins is rare.
 _PY_LINKING_DECORATORS = frozenset({"property", "overload", "typing.overload"})
 
 
@@ -566,30 +573,54 @@ def _python_idiom_linked(node: "NodeInfo") -> bool:
     return False
 
 
-def _collapse_python_idiom_duplicates(nodes: list["NodeInfo"]) -> None:
+def _bare_qualified(node: "NodeInfo") -> str:
+    """Unsuffixed qualified name, mirroring ``CodeParser._qualify``."""
+    if node.parent_name:
+        return f"{node.file_path}::{node.parent_name}.{node.name}"
+    return f"{node.file_path}::{node.name}"
+
+
+def _collapse_python_idiom_duplicates(
+    nodes: list["NodeInfo"], edges: list["EdgeInfo"],
+) -> None:
     """Collapse Python same-name defs that form ONE logical symbol.
 
     ``@property``/``@x.setter`` pairs, ``@overload`` stacks and conditional
     (``if``/``try``) redefinitions are a single symbol; keep only the last
     def (the implementation), matching upstream last-write-wins, so callers
-    stay followable instead of degrading to AMBIGUOUS.
+    stay followable instead of degrading to AMBIGUOUS. Dropped defs also
+    lose their CONTAINS edge so one row per surviving node remains.
+
+    Grouping uses the enclosing scope's tree identity (``scope_token``), not
+    just ``parent_name``: same-name closures in different functions, or
+    methods of distinct same-name classes, are different symbols and must
+    never cross-collapse.
     """
-    groups: dict[tuple[str, Optional[str], str, str], list[NodeInfo]] = {}
+    groups: dict[tuple, list[NodeInfo]] = {}
     for node in nodes:
         if node.kind == "File" or node.language != "python":
             continue
-        key = (node.file_path, node.parent_name, node.name, node.kind)
+        key = (node.file_path, node.parent_name, node.name, node.kind,
+               node.scope_token)
         groups.setdefault(key, []).append(node)
 
     drop: set[int] = set()
+    dropped_contains: set[tuple[str, int]] = set()
     for group in groups.values():
         if len(group) < 2:
             continue
         if any(_python_idiom_linked(n) or n.extra.get("conditional_def")
                for n in group):
-            drop.update(id(n) for n in group[:-1])
+            for n in group[:-1]:
+                drop.add(id(n))
+                dropped_contains.add((_bare_qualified(n), n.line_start))
     if drop:
         nodes[:] = [n for n in nodes if id(n) not in drop]
+        edges[:] = [
+            e for e in edges
+            if not (e.kind == "CONTAINS"
+                    and (e.target, e.line) in dropped_contains)
+        ]
 
 
 @dataclass
@@ -1791,6 +1822,16 @@ def _python_in_conditional_block(node) -> bool:
     return False
 
 
+def _python_scope_token(node) -> int:
+    """Identity of the enclosing def/class tree node (module scope = -1)."""
+    parent = node.parent
+    while parent is not None:
+        if parent.type in ("function_definition", "class_definition"):
+            return parent.start_byte
+        parent = parent.parent
+    return -1
+
+
 def _csharp_attribute_names(node) -> list[str]:
     """Return C# attribute names from ``attribute_list`` children of *node*.
 
@@ -2323,7 +2364,7 @@ class CodeParser:
         """
         nodes, edges = self._parse_bytes_dispatch(path, source)
         if nodes:
-            _collapse_python_idiom_duplicates(nodes)
+            _collapse_python_idiom_duplicates(nodes, edges)
             _assign_disambiguators(nodes)
             self._stamp_duplicate_edge_endpoints(nodes, edges)
         return nodes, edges
@@ -2477,7 +2518,7 @@ class CodeParser:
         # Collapse before resolution so idiom groups (property pairs, overload
         # stacks, conditional defs) count as ONE definition and their callers
         # resolve followably instead of being reverted to bare.
-        _collapse_python_idiom_duplicates(nodes)
+        _collapse_python_idiom_duplicates(nodes, edges)
 
         # Resolve bare call targets to qualified names using same-file definitions
         edges = self._resolve_call_targets(nodes, edges, file_path_str)
@@ -4184,10 +4225,16 @@ class CodeParser:
             return
 
         def _containing(group: list[NodeInfo], line: int) -> Optional[NodeInfo]:
+            # Innermost (smallest) containing range wins, so a nested
+            # same-name duplicate owns its own body's edges, not the outer's.
+            best: Optional[NodeInfo] = None
             for n in group:
-                if n.line_start <= line <= n.line_end:
-                    return n
-            return None
+                if n.line_start <= line <= n.line_end and (
+                    best is None
+                    or n.line_end - n.line_start < best.line_end - best.line_start
+                ):
+                    best = n
+            return best
 
         consumed: set[int] = set()
         for edge in edges:
@@ -9514,9 +9561,13 @@ class CodeParser:
         if deco_list:
             method_extra["decorators"] = list(deco_list)
 
-        # Marks if/try redefinition idioms for identity collapsing.
-        if language == "python" and _python_in_conditional_block(child):
-            method_extra["conditional_def"] = True
+        # Marks if/try redefinition idioms and the enclosing scope's tree
+        # identity for identity collapsing.
+        scope_token: Optional[int] = None
+        if language == "python":
+            scope_token = _python_scope_token(child)
+            if _python_in_conditional_block(child):
+                method_extra["conditional_def"] = True
 
         docstring = self._get_docstring_summary(child, language)
         if docstring:
@@ -9535,6 +9586,7 @@ class CodeParser:
             modifiers=modifiers_str,
             is_test=is_test,
             extra=method_extra,
+            scope_token=scope_token,
         )
         nodes.append(node)
 
