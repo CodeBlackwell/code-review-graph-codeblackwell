@@ -528,9 +528,17 @@ def _assign_disambiguators(nodes: list["NodeInfo"]) -> None:
     """Stamp an occurrence ordinal on 2nd+ nodes sharing a scope, name and kind.
 
     Two symbols with the same ``(file, parent, name, kind)`` are inherently
-    ambiguous. The ordinal gives each a distinct, position-independent identity
-    so neither is silently dropped on insert; it is recomputed on every parse,
-    so it survives line moves.
+    ambiguous. The ordinal is line-independent but document-order ranked:
+    line moves never change it, reordering two identical-key defs keeps the
+    key set stable (each body may land under the other's ordinal), and
+    deleting the first occurrence renumbers the rest. It is recomputed on
+    every parse.
+
+    The grouping key includes ``kind`` even though qualified names do not:
+    keeping kinds in separate ordinal sequences means unrelated same-name
+    symbols of different kinds never shift each other's ordinals. The
+    resulting cross-kind unsuffixed collision predates this feature (the
+    qualified-name scheme has never encoded kind) and is accepted.
     """
     counts: dict[tuple[str, Optional[str], str, str], int] = {}
     for node in nodes:
@@ -541,6 +549,47 @@ def _assign_disambiguators(nodes: list["NodeInfo"]) -> None:
         if seen:
             node.disambiguator = str(seen)
         counts[key] = seen + 1
+
+
+_PY_LINKING_DECORATORS = frozenset({"property", "overload", "typing.overload"})
+
+
+def _python_idiom_linked(node: "NodeInfo") -> bool:
+    """True when a def carries a decorator that links same-name defs."""
+    for deco in node.extra.get("decorators") or []:
+        base = deco.split("(", 1)[0].strip()
+        if base in _PY_LINKING_DECORATORS:
+            return True
+        if base in (f"{node.name}.setter", f"{node.name}.deleter",
+                    f"{node.name}.getter"):
+            return True
+    return False
+
+
+def _collapse_python_idiom_duplicates(nodes: list["NodeInfo"]) -> None:
+    """Collapse Python same-name defs that form ONE logical symbol.
+
+    ``@property``/``@x.setter`` pairs, ``@overload`` stacks and conditional
+    (``if``/``try``) redefinitions are a single symbol; keep only the last
+    def (the implementation), matching upstream last-write-wins, so callers
+    stay followable instead of degrading to AMBIGUOUS.
+    """
+    groups: dict[tuple[str, Optional[str], str, str], list[NodeInfo]] = {}
+    for node in nodes:
+        if node.kind == "File" or node.language != "python":
+            continue
+        key = (node.file_path, node.parent_name, node.name, node.kind)
+        groups.setdefault(key, []).append(node)
+
+    drop: set[int] = set()
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        if any(_python_idiom_linked(n) or n.extra.get("conditional_def")
+               for n in group):
+            drop.update(id(n) for n in group[:-1])
+    if drop:
+        nodes[:] = [n for n in nodes if id(n) not in drop]
 
 
 @dataclass
@@ -1730,6 +1779,18 @@ def _python_decorator_names(node) -> list[str]:
     return names
 
 
+def _python_in_conditional_block(node) -> bool:
+    """True when a Python def sits under ``if``/``try`` within its own scope."""
+    parent = node.parent
+    while parent is not None:
+        if parent.type in ("if_statement", "try_statement"):
+            return True
+        if parent.type in ("function_definition", "class_definition", "module"):
+            return False
+        parent = parent.parent
+    return False
+
+
 def _csharp_attribute_names(node) -> list[str]:
     """Return C# attribute names from ``attribute_list`` children of *node*.
 
@@ -2253,7 +2314,24 @@ class CodeParser:
 
         This avoids re-reading the file from disk, eliminating TOCTOU gaps
         when the caller has already read the bytes (e.g. for hashing).
+
+        Every parse path (tree-sitter, Vue/Svelte, Blade, notebooks, regex
+        fallbacks) flows through this single choke point, so duplicate-symbol
+        identity is finalized here: Python one-logical-symbol idioms collapse,
+        remaining identical-key duplicates get occurrence ordinals, and edges
+        are re-pointed at the ordinal-stamped identities.
         """
+        nodes, edges = self._parse_bytes_dispatch(path, source)
+        if nodes:
+            _collapse_python_idiom_duplicates(nodes)
+            _assign_disambiguators(nodes)
+            self._stamp_duplicate_edge_endpoints(nodes, edges)
+        return nodes, edges
+
+    def _parse_bytes_dispatch(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Route bytes to the language-specific parser. No identity stamping."""
         language = self.detect_language(path)
         if not language:
             return [], []
@@ -2396,7 +2474,10 @@ class CodeParser:
 
         edges = self._apply_typed_call_targets(edges, typed_call_targets)
 
-        _assign_disambiguators(nodes)
+        # Collapse before resolution so idiom groups (property pairs, overload
+        # stacks, conditional defs) count as ONE definition and their callers
+        # resolve followably instead of being reverted to bare.
+        _collapse_python_idiom_duplicates(nodes)
 
         # Resolve bare call targets to qualified names using same-file definitions
         edges = self._resolve_call_targets(nodes, edges, file_path_str)
@@ -4078,6 +4159,61 @@ class CodeParser:
             line=edge.line,
             extra=edge.extra,
         )
+
+    def _stamp_duplicate_edge_endpoints(
+        self, nodes: list[NodeInfo], edges: list[EdgeInfo],
+    ) -> None:
+        """Re-point edges at ordinal-stamped duplicate identities.
+
+        Edges are built with unsuffixed qualified names before ordinals are
+        assigned. For every duplicate group this retargets structural edges
+        (CONTAINS by definition line, TESTED_BY by line containment) to the
+        occurrence they belong to, and re-sources body-emitted edges by line
+        containment, so every ``#N`` node is CONTAINS-reachable and owns the
+        edges from its own body. CALLS/REFERENCES *targets* are left alone:
+        the store's evidence resolver picks a duplicate or flags ambiguity.
+        """
+        groups: dict[str, list[NodeInfo]] = {}
+        for node in nodes:
+            if node.kind == "File":
+                continue
+            bare = self._qualify(node.name, node.file_path, node.parent_name)
+            groups.setdefault(bare, []).append(node)
+        groups = {bare: g for bare, g in groups.items() if len(g) > 1}
+        if not groups:
+            return
+
+        def _containing(group: list[NodeInfo], line: int) -> Optional[NodeInfo]:
+            for n in group:
+                if n.line_start <= line <= n.line_end:
+                    return n
+            return None
+
+        consumed: set[int] = set()
+        for edge in edges:
+            group = groups.get(edge.source)
+            if group is not None and edge.kind != "TESTED_BY":
+                owner = _containing(group, edge.line)
+                if owner is not None and owner.disambiguator:
+                    edge.source = f"{edge.source}#{owner.disambiguator}"
+
+            group = groups.get(edge.target)
+            if group is None or edge.kind in ("CALLS", "REFERENCES"):
+                continue
+            if edge.kind == "CONTAINS":
+                # One CONTAINS edge per definition, matched by start line;
+                # `consumed` pairs same-line duplicates off in document order.
+                owner = next(
+                    (n for n in group
+                     if id(n) not in consumed and n.line_start == edge.line),
+                    None,
+                )
+                if owner is not None:
+                    consumed.add(id(owner))
+            else:
+                owner = _containing(group, edge.line)
+            if owner is not None and owner.disambiguator:
+                edge.target = f"{edge.target}#{owner.disambiguator}"
 
     def _resolve_julia_call_targets(
         self,
@@ -7657,7 +7793,33 @@ class CodeParser:
             # An object literal's methods belong to the binding's scope, so they
             # qualify as ``binding.method`` — distinct per receiver and stable
             # across line moves, rather than colliding on the bare method name.
+            # The binding itself becomes a Class node (mirroring how class
+            # declarations are represented, marked as an object literal) so
+            # File CONTAINS binding CONTAINS methods is a connected chain.
+            # Nested object literals flatten onto this outer binding, so their
+            # methods share its scope and calls through the inner receiver
+            # degrade to AMBIGUOUS — accepted Phase-1 behavior.
             if var_name and object_node and not func_node:
+                nodes.append(NodeInfo(
+                    kind="Class",
+                    name=var_name,
+                    file_path=file_path,
+                    line_start=declarator.start_point[0] + 1,
+                    line_end=declarator.end_point[0] + 1,
+                    language=language,
+                    extra={"object_literal": True},
+                ))
+                container = (
+                    self._qualify(enclosing_class, file_path, None)
+                    if enclosing_class else file_path
+                )
+                edges.append(EdgeInfo(
+                    kind="CONTAINS",
+                    source=container,
+                    target=self._qualify(var_name, file_path, None),
+                    file_path=file_path,
+                    line=declarator.start_point[0] + 1,
+                ))
                 self._extract_from_tree(
                     object_node, source, language, file_path, nodes, edges,
                     enclosing_class=var_name,
@@ -9351,6 +9513,10 @@ class CodeParser:
         modifiers_str: Optional[str] = ",".join(deco_list) if deco_list else None
         if deco_list:
             method_extra["decorators"] = list(deco_list)
+
+        # Marks if/try redefinition idioms for identity collapsing.
+        if language == "python" and _python_in_conditional_block(child):
+            method_extra["conditional_def"] = True
 
         docstring = self._get_docstring_summary(child, language)
         if docstring:
