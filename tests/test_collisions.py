@@ -497,6 +497,128 @@ class TestOrdinalSemantics:
         ) == ["setup"]
 
 
+class TestCollapseScoping:
+    """Collapse only merges defs sharing the same enclosing scope node."""
+
+    def _parse(self, tmp_path, text, name="t.py"):
+        parser = CodeParser()
+        path = tmp_path / name
+        path.write_text(text)
+        return parser.parse_file(path)
+
+    def test_closure_does_not_collapse_with_module_def(self, tmp_path):
+        nodes, _ = self._parse(
+            tmp_path,
+            "def outer():\n"
+            "    ok = True\n"
+            "    if ok:\n"
+            "        def inner():\n"
+            "            return 1\n"
+            "    return inner\n"
+            "\n"
+            "def inner():\n"
+            "    return 2\n",
+        )
+        inners = [n for n in nodes if n.name == "inner"]
+        assert len(inners) == 2
+
+    def test_same_name_closures_in_different_functions_survive(self, tmp_path):
+        nodes, _ = self._parse(
+            tmp_path,
+            "def walk_a(tree):\n"
+            "    if tree:\n"
+            "        def visit(n):\n"
+            "            return 1\n"
+            "    return visit\n"
+            "\n"
+            "def walk_b(tree):\n"
+            "    def visit(n):\n"
+            "        return 2\n"
+            "    return visit\n",
+        )
+        visits = [n for n in nodes if n.name == "visit"]
+        assert len(visits) == 2
+
+    def test_duplicate_classes_keep_one_method_each(self, tmp_path):
+        nodes, edges = self._parse(
+            tmp_path,
+            "class Config:\n"
+            "    @property\n"
+            "    def value(self):\n"
+            "        return 1\n"
+            "\n"
+            "class Config:\n"
+            "    def value(self):\n"
+            "        return 2\n",
+        )
+        values = [n for n in nodes if n.name == "value"]
+        assert len(values) == 2
+        # Connected, per-class chains: no cross-class CONTAINS.
+        contains = {(e.source.rsplit("::", 1)[-1], e.target.rsplit("::", 1)[-1])
+                    for e in edges if e.kind == "CONTAINS"
+                    and e.target.rsplit("::", 1)[-1].startswith("Config.")}
+        assert contains == {("Config", "Config.value"),
+                            ("Config#1", "Config.value#1")}
+
+    def test_collapse_drops_the_dropped_defs_contains_edge(self, tmp_path):
+        nodes, edges = self._parse(
+            tmp_path,
+            "class Config:\n"
+            "    @property\n"
+            "    def value(self):\n"
+            "        return self._v\n"
+            "\n"
+            "    @value.setter\n"
+            "    def value(self, v):\n"
+            "        self._v = v\n",
+        )
+        survivor = next(n for n in nodes if n.name == "value")
+        rows = [e for e in edges if e.kind == "CONTAINS"
+                and e.target.endswith("Config.value")]
+        assert len(rows) == 1
+        assert rows[0].line == survivor.line_start
+
+
+class TestIncrementalHealsClearedHashes:
+    """Files with empty stored hashes re-ingest even when git sees no change."""
+
+    def test_stale_file_reingested_when_unrelated_file_changes(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        a = tmp_path / "a.ts"
+        b = tmp_path / "b.ts"
+        a.write_text("function f() { return 1 }\nfunction f() { return 2 }\n")
+        b.write_text("function g() { return 3 }\n")
+
+        store = GraphStore(tmp_path / "g.db")
+        # Simulate a pre-fix graph after migration v10: collapsed identities,
+        # empty file hashes.
+        for path, name in ((a, "f"), (b, "g")):
+            store.upsert_node(NodeInfo(
+                kind="File", name=str(path), file_path=str(path),
+                line_start=1, line_end=2, language="typescript",
+            ), file_hash="")
+            store.upsert_node(NodeInfo(
+                kind="Function", name=name, file_path=str(path),
+                line_start=1, line_end=1, language="typescript",
+            ), file_hash="")
+        store._conn.commit()
+
+        with _tracked(["a.ts", "b.ts"]):
+            incremental_update(tmp_path, store, changed_files=["b.ts"])
+
+        keys = sorted(
+            r["qualified_name"].rsplit("::", 1)[-1]
+            for r in store._conn.execute(
+                "SELECT qualified_name FROM nodes "
+                "WHERE file_path = ? AND kind != 'File'", (str(a),))
+        )
+        assert keys == ["f", "f#1"]
+        hashes = {r["file_hash"] for r in store._conn.execute(
+            "SELECT file_hash FROM nodes")}
+        assert "" not in hashes
+        store.close()
+
+
 class TestSchemaMigrationForcesReingest:
     """v10 clears stored file hashes so pre-fix graphs re-ingest everything."""
 
