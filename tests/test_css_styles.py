@@ -182,6 +182,26 @@ def test_incremental_rename_repoints(tmp_path, monkeypatch):
     assert not any("old.module.css" in t for _, t, _ in edges)
 
 
+def test_incremental_heal_stylesheet_created_after_component(tmp_path, monkeypatch):
+    # S1: component indexed while its stylesheet is missing; the stylesheet
+    # appearing later must link on an incremental update of the CSS alone.
+    monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+    (tmp_path / "Comp.tsx").write_text(
+        "import styles from './s.module.css';\n"
+        "export function Comp() { return <div className={styles.card}>x</div>; }\n"
+    )
+    store = GraphStore(tmp_path / "graph.db")
+    stats = full_build(tmp_path, store)
+    assert stats["css_resolution"]["styles_edges"] == 0
+
+    (tmp_path / "s.module.css").write_text(".card { color: red; }\n")
+    stats = incremental_update(tmp_path, store, changed_files=["s.module.css"])
+    assert stats["css_resolution"]["styles_edges"] == 1
+    edges = _styles_edges(store)
+    assert len(edges) == 1
+    assert edges[0]["target_qualified"].endswith("s.module.css::.card")
+
+
 def test_scoped_sfc_no_conflict(tmp_path, monkeypatch):
     # T4: scoped Vue/Svelte styles are tagged scoped and never produce conflicts.
     (tmp_path / "W.vue").write_text(

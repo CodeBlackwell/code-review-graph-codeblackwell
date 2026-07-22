@@ -1,10 +1,14 @@
 """Post-build CSS Modules linker.
 
 Creates STYLES edges from components to the CSS selectors that style them,
-restricted to the stylesheet actually imported. Each ``className={styles.foo}``
-reference is resolved through the importing file's ``css_module_imports`` map to
-one file, so a reference can only ever link to selectors defined there — never
-to a same-named class elsewhere in the repository.
+restricted to the stylesheet actually imported. The parser records each CSS
+Module import as its RAW import string (``css_module_imports``); this pass
+resolves that string to a stylesheet file, so a reference can only ever link
+to selectors defined there — never to a same-named class elsewhere in the
+repository. Resolving here (not at parse time) means a stylesheet that appears
+or is renamed after the component was indexed links on the next update, since
+this pass re-runs whenever any CSS-relevant file changes. An import that does
+not resolve produces no edge.
 
 Only CSS Modules are linked. Global stylesheets carry no import to scope them,
 and scoped Vue/Svelte styles are component-local; both are parsed into the graph
@@ -20,6 +24,8 @@ import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from .graph import GraphStore
 
 logger = logging.getLogger(__name__)
@@ -32,13 +38,15 @@ def _camel_to_kebab(name: str) -> str:
     return re.sub(r"(?<=[a-z0-9])([A-Z])", r"-\1", name).lower()
 
 
-def resolve_css_styles(store: GraphStore) -> dict:
+def resolve_css_styles(store: GraphStore, repo_root: Path) -> dict:
     """Link component CSS Module references to their imported selectors.
 
     Safe to call repeatedly: rebuilds all STYLES edges from scratch.
     Returns a dict with the STYLES edge count for telemetry.
     """
-    from .parser import EdgeInfo
+    from .parser import CodeParser, EdgeInfo
+
+    parser = CodeParser(repo_root)
 
     conn = store._conn
     conn.execute("DELETE FROM edges WHERE kind = 'STYLES'")
@@ -76,18 +84,29 @@ def resolve_css_styles(store: GraphStore) -> dict:
         conn.commit()
         return {"styles_edges": 0}
 
-    # file_path -> {import_name: resolved_stylesheet_path}
+    # file_path -> {import_name: resolved stylesheet path}. Imports are stored
+    # as raw strings and resolved here, each run; unresolvable ones are dropped
+    # so linking can never fall back to a repository-wide join.
     file_imports: dict[str, dict[str, str]] = {}
     for row in conn.execute(
-        "SELECT file_path, extra FROM nodes "
+        "SELECT file_path, language, extra FROM nodes "
         "WHERE kind = 'File' AND extra LIKE '%css_module_imports%'"
     ).fetchall():
         try:
-            file_imports[row["file_path"]] = json.loads(
+            raw_imports = json.loads(
                 row["extra"] or "{}"
             ).get("css_module_imports", {})
         except (json.JSONDecodeError, TypeError):
             continue
+        resolved_imports = {}
+        for name, module in raw_imports.items():
+            resolved = parser._resolve_module_to_file(
+                module, row["file_path"], row["language"] or "typescript",
+            )
+            if resolved:
+                resolved_imports[name] = resolved
+        if resolved_imports:
+            file_imports[row["file_path"]] = resolved_imports
 
     count = 0
     for row in conn.execute(

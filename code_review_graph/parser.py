@@ -2405,30 +2405,28 @@ class CodeParser:
 
         if language in ("javascript", "typescript", "tsx"):
             self._attach_css_module_refs(
-                tree.root_node, file_path_str, language, nodes, import_map,
+                tree.root_node, file_path_str, nodes, import_map,
             )
 
         return nodes, edges
 
     def _attach_css_module_refs(
-        self, root, file_path: str, language: str,
+        self, root, file_path: str,
         nodes: list[NodeInfo], import_map: dict[str, str],
     ) -> None:
         """Record CSS Module usage (``className={styles.foo}``) for later
         import-scoped STYLES linking.
 
         The importing file's ``css_module_imports`` maps each imported name to
-        the resolved stylesheet path; each ``styles.foo`` reference is attached
-        to the innermost enclosing component node. Only resolvable imports are
-        recorded so linking can never fall back to a repository-wide join.
+        the RAW import string; each ``styles.foo`` reference is attached to the
+        innermost enclosing component node. Module-to-file resolution happens at
+        link time in css_resolver so a stylesheet that appears (or is renamed)
+        after this file was indexed still links on the next update.
         """
-        module_imports: dict[str, str] = {}
-        for name, module in import_map.items():
-            if ".module.css" not in module and ".module.scss" not in module:
-                continue
-            resolved = self._resolve_module_to_file(module, file_path, language)
-            if resolved:
-                module_imports[name] = resolved
+        module_imports: dict[str, str] = {
+            name: module for name, module in import_map.items()
+            if ".module.css" in module or ".module.scss" in module
+        }
         if not module_imports:
             return
         nodes[0].extra["css_module_imports"] = module_imports
